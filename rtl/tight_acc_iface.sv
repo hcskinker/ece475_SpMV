@@ -62,7 +62,74 @@ assign mem_req_transid = 6'b0;
 assign mem_req_addr = 40'd0;
 // FOO implementation, respond untouched every command
 assign resp_val = cmd_val;
-assign resp_data = cmd_config_data;
+assign resp_data = cmd_config_data; 
+
+
+// Command Manager
+typedef enum reg[1:0] {
+    INIT_SPMV,
+    LD_SPM,             // With this command you also pass the length of the spm component arrays 
+    LD_VECTOR,          // Load the vector
+    BEGIN_SPMV          
+}
+
+
+
+typedef enum reg [1:0] {
+    IDLE,                   // Doing Nothing 
+    VECT_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
+    COMPUTE_SPMV
+} spmv_state;
+
+spmv_state op_state;
+
+// Next State Logic 
+always_ff @ (posedge clk) begin
+    if (!rst_n) begin
+
+    end
+    else begin
+        case (op_state) 
+            IDLE: begin
+
+            end
+            VECT_PREFETCH: begin
+
+            end
+            COMPUTE_SPMV: begin
+
+            end
+            default: begin
+                
+            end
+
+        endcase
+    end
+end
+
+// State Output
+always @ (*) begin
+    if (!rst_n) begin
+
+    end
+    else begin
+      case (op_state)
+          IDLE: begin
+
+          end
+          VECT_PREFETCH: begin
+
+          end
+          COMPUTE_SPMV: begin
+
+          end
+          default : begin
+
+          end
+      endcase
+    end
+
+end
 
 // Other things that we need are a software algorithm to convert a matrix into the CISR format
 
@@ -78,6 +145,9 @@ Things needed:
     - The vector loader 
 
 - Cache line is 64 bytes (8 64 bit words 
+
+- Ensure that the fetches are cache aligned otherwise the algorithm wouldn't work (requires that the matrices are aligned)
+- Or you design the architecture such that if you miss on the some of the values in the cache line (ie a memory call returns less values then expected you can still align the fetch later)
 
 - Do we want to use a large section of the RAM to store the vector instead of doing the crossbar 
 - What access structure do we need if we are parallelizing the result 
@@ -106,7 +176,7 @@ Memory Request Backup in the Queue
 
 */
 
-// Parallelized Commutation Channels 
+// Parallelized Computation Channels 
 
 /*
 We need to load the values from the sparse matrix memory into an arbriter struture that directs the vectors into whichever channel they should be in
@@ -138,6 +208,8 @@ Computational Pipeline:
  - Value (Trans id 1)
  - Column Indice (Trans id 2)
  - Row Length (Trans id 3)
+
+This fetch needs to be queued so that we can continuously pull the values 
 
 2. Arbiter figures which channel to forward the values to depending on which channel is available
 
