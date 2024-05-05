@@ -29,7 +29,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 `default_nettype none
 `endif
 
-module tight_acc_iface (
+module tight_acc_iface #(
+    parameter CHANNELS = 16
+)  (
     input  wire clk,
     input  wire rst_n,
     // Command iface to receive "instructions" and configurations
@@ -83,19 +85,89 @@ assign cmd = cmd_opcode[1:0];
 
 wire [`DCP_PADDR_MASK       ] cmd_spm_base_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
 wire [`DCP_PADDR_MASK       ] cmd_vec_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
-wire [19:0] cmd_vec_len = cmd_config_data[60:41]; // Vector length when sending over the pointer
-wire [15:0] cmd_spm_nnz = cmd_config_data[15:0];  // Non Zero Elements
-wire [15:0] cmd_spm_nnzr = cmd_config_data[31:16]; // Non Zero Rows (Simplify fetching the rows)
+wire [15:0] cmd_vec_len = cmd_config_data[46:41]; // Vector length when sending over the pointer (16 bits)
+wire [15:0] cmd_spm_nnz = cmd_config_data[15:0];  // Non Zero Elements (16-bits)
+wire [15:0] cmd_spm_nnzr = cmd_config_data[31:16]; // Non Zero Rows (Simplify fetching the rows) (16 bits)
 
-reg init_spm_pntr, init_ld_spm_arr, init_ld_vec; // 
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// State Machine for Commands and Operation
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+typedef enum reg [1:0] {
+    IDLE,                   // Doing Nothing 
+    SPMV_INIT,              // Handle Grabbbing Vectors 
+    VEC_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
+    COMPUTE_SPMV
+} spmv_state;
+
+spmv_state op_state;
+
+reg [1:0] spmv_init_checksum; //Doesn't begin prefetching until Checksum = 2
+
+// Next State Logic 
+always_ff @ (posedge clk) begin
+    if (!rst_n) begin
+        op_state <= IDLE;
+    end
+    else begin
+        case (op_state) 
+            IDLE: begin
+                if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
+            end
+            SPMV_INIT: begin
+                if (spmv_init_checksum == 2) op_state <= VEC_PREFETCH;
+            end
+            VEC_PREFETCH: begin
+                // Control signal from a memory control unit
+            end
+            COMPUTE_SPMV: begin
+
+            end
+            default: begin
+
+            end
+        endcase
+    end
+end
+
+// State Outputs
+always @ (*) begin
+    init_spm_pntr = 0;
+    init_ld_spm_arr = 0;
+    init_ld_vec = 0;
+    
+    case (op_state)
+        IDLE: begin
+            init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
+        end
+        SPMV_INIT: begin
+            init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM);
+            init_ld_vec = cmd_hsk && (cmd == LD_VEC);
+        end
+        VEC_PREFETCH: begin
+            // Output control for the vector prefetch from memory
+            // For instance take control of the memory unit (Shared between the pipeline and the computational channels) 
+        end
+        COMPUTE_SPMV: begin
+            // Associate Channel Control Logic for starting the computation
+        end
+        default : begin
+
+        end
+    endcase
+    
+end
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Accelerator Registers Storing Pointers to Arrays and Lengths
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+reg init_spm_pntr, init_ld_spm_arr, init_ld_vec; 
 
 reg [39:0] spm_val_pntr, spm_col_idx_pntr, spm_row_len_pntr, vec_pntr;
 reg [19:0] vec_len;
 reg [15:0] spm_nnz, spm_nzzr; 
-reg [1:0] spmv_init_checksum; //Doesn't begin prefetching until Checksum = 2
-
-
 
 always_ff @ (poedge clk) begin
     if (!rst_n) begin
@@ -122,82 +194,16 @@ always_ff @ (poedge clk) begin
         end
         else if (init_ld_vec) begin
             vec_pntr <= cmd_vec_pntr;
+            vec_len <= cmd_vec_len;
 
             spmv_init_checksum <= spmv_init_checksum + 1;
         end
     end
 end
 
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// State Machine for FSM
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef enum reg [1:0] {
-    IDLE,                   // Doing Nothing 
-    SPMV_INIT,              // Handle Grabbbing Vectors 
-    VEC_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
-    COMPUTE_SPMV
-} spmv_state;
-
-spmv_state op_state;
-
-// Next State Logic 
-always_ff @ (posedge clk) begin
-    if (!rst_n) begin
-
-    end
-    else begin
-        case (op_state) 
-            IDLE: begin
-                if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
-            end
-            SPMV_INIT: begin
-                if (spmv_init_checksum == 2) op_state <= VEC_PREFETCH;
-            end
-            VEC_PREFETCH: begin
-                // Control signal from a memory control unit
-            end
-            COMPUTE_SPMV: begin
-
-            end
-            default: begin
-
-            end
-        endcase
-    end
-end
-
-// State Outputs
-always @ (*) begin
-    if (!rst_n) begin
-        init_spm_pntr = 0;
-        init_ld_spm_arr = 0;
-        init_ld_vec = 0;
-    end
-    else begin
-      case (op_state)
-          IDLE: begin
-              init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
-          end
-          SPMV_INIT: begin
-              init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM);
-              init_ld_vec = cmd_hsk && (cmd == LD_VEC);
-          end
-          VEC_PREFETCH: begin
-              // Output control for the vector prefetch from memory
-              // For instance take control of the memory unit (Shared between the pipeline and the computational channels) 
-          end
-          COMPUTE_SPMV: begin
-              // Associate Channel Control Logic for starting the computation
-          end
-          default : begin
-
-          end
-      endcase
-    end
-
-end
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Vector Prefetching Control 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 

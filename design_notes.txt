@@ -11,7 +11,7 @@ Things needed:
     - The Sparse Matrix Loader 
     - The vector loader 
 
-- Cache line is 64 bytes (8 64 bit words 
+- Cache line is 64 bytes (8) 64 bit words 
 
 - Ensure that the fetches are cache aligned otherwise the algorithm wouldn't work (requires that the matrices are aligned)
 - Or you design the architecture such that if you miss on the some of the values in the cache line (ie a memory call returns less values then expected you can still align the fetch later)
@@ -105,3 +105,90 @@ First in idle state.
 
 5. Enter the pipeline 
 */
+
+
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Handling the Memory Operations
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Two separate modules: 
+
+        1. For the Vector Fetching (Multiple Ports dictated by the number of channels available for the parallel processing)
+        2. For the SPM Fetching of the elements
+    
+
+1. Vector Fetching Module Requirements:
+        a. Memory Fetch Take control of the NoC1 Interface
+            Signals for Control (Multiplex signal lines feeding into the mem fetch) something like vec_fetch 
+        b. Monitor the NoC2 Transaction ID's for the appropiate return 
+
+        Utilizes a Return Buffer (Filled by transaction receipts) (Max 64) 
+        - Don't want to handle loop around case 
+        
+        Vector entries are assumed 32-bit integers ( 4 bytes )
+        Cache Line is 64 bytes ( Max allowable )
+
+        16 vector components per line 
+
+        Max Length of Vector Absolute is 16*64 = 1024 (Reduce the lenght size)
+
+
+        Transaction ID table (Fast Lookup)
+        -  Allocate into the Transaction ID table the corresponding registers (Max 16 registers for each memory request from cache line)
+        -  Fill into those registers (How do we multiplex those registers?) File values to the corresponding registers (Can't assume equal access times)
+        -  Line for the registers 
+        -  Registers ordered from left to right 
+        -  Calculate the Cache Line Offset for Register Offset per Transaction 
+
+        A 32-bit integer is aligned by 0x04 = 0b00000100. Since it has 4 bytes
+
+        The cache line is aligned to 0b01000000 = 0x40. 
+
+        Lets say I have a physical vector address ending a byte, 0x70 = 0b01110000 the lower two bits are offsets in the cache line determined by 0b0011.
+
+        So we start the register count offset at 3. 
+
+        So we retrieve the first cache line off of 0b01000000 = 0x0400 and we offset the register addressing in the transaction table by 3. 
+
+        On that first retrieval we also have to offset grabbing the values from the cacheline. 
+
+                We know that the register offset is 3, so we do 3*4 bytes as the offset in the first cache line. [63:3*4]. We know the transaction ID is sequential for the vector. 
+                Use as index to the a block of registers. 
+                
+                16 Registers per cache line.
+
+                multiplex 16 different registers 
+
+                Register file with all of the data stored. 
+
+                16 lines - divide up the cache line return
+
+                Check trans_id == 0, use the offset to start where the cache line is returned 
+
+        Looks like below for offset = 2
+
+        data[0] = cache_line[31:0];
+        data[1] = cache_line[63:32];
+        data[2] = cache_line[95:64];
+        data[3] = cache_line[127:96];
+
+        if (trans_id == 0) begin
+            reg_file[trans_id] = data[offset]
+            reg_file[trans_id+1] = data[offset+1] // Stop at offset + i == num of components in cacheline
+        end
+        else begin
+            reg_file[offset*trans_id]
+        end
+ 
+        We need a request and a response handler based off of the table.
+                - When a valid response is recieved check the id and grab registers from that transaction
+                - For the request, we just are pushing a request every single cycle for the prefetch routine
+        
+
+        
+
+
+
