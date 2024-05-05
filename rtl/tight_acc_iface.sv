@@ -64,20 +64,73 @@ assign mem_req_addr = 40'd0;
 assign resp_val = cmd_val;
 assign resp_data = cmd_config_data; 
 
-
 // Command Manager
 typedef enum reg[1:0] {
-    INIT_SPMV,
-    LD_SPM,             // With this command you also pass the length of the spm component arrays 
-    LD_VECTOR,          // Load the vector
-    BEGIN_SPMV          
-}
+    INIT_SPMV,          // Send the SPM Matrix pointer 
+    LD_SPM_DATA,            // Send the info regarding length
+    LD_VEC_DATA          // Load the vecto          
+} spmv_cmd;
+
+spmv_cmd cmd;
+wire cmd_hsk = !busy & cmd_val;
+
+assign cmd = cmd_opcode[1:0];
+
+reg init_spm_pntr, ld_spm_arr, ld_vec;
+
+reg [39:0] spm_val_pntr, spm_col_idx_pntr, spm_row_len_pntr, vec_pntr;
+reg [19:0] vec_len;
+reg [15:0] spm_nnz, spm_nzzr; 
+reg [1:0] spmv_init_checksum; //Doesn't begin prefetching until Checksum = 2
+
+wire [`DCP_PADDR_MASK       ] cmd_spm_base_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
+wire [`DCP_PADDR_MASK       ] cmd_vec_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
+wire [19:0] cmd_vec_len = cmd_config_data[60:41]; // Vector length when sending over the pointer
+wire [15:0] cmd_spm_nnz = cmd_config_data[15:0];  // Non Zero Elements
+wire [15:0] cmd_spm_nnzr = cmd_config_data[31:16]; // Non Zero Rows (Simplify fetching the rows)
 
 
+// Registers holding the pointers to the sparse matrix
+always_ff @ (poedge clk) begin
+    if (!rst_n) begin
+        spmv_init_checksum <= 0;
+        spm_val_pntr <= 0;
+        spm_col_idx_pntr <= 0;
+        spm_row_len_pntr <= 0;
+        spm_nnz <= 0;
+        spm_nnzr <= 0;
+    end
+    else begin
+        if (init_spm_pntr) begin
+            spm_val_pntr <= cmd_spm_base_pntr;
+            spmv_init_checksum <= 0; // Reset every initialization call
+        end
+        else if (ld_spm_arr) begin
+            spm_nnz <= cmd_spm_nnz;
+            spm_nnzr <= cmd_spm_nzzr;
+
+            spm_col_idx_pntr <= spm_val_pntr + cmd_spm_nnz;
+            spm_row_len_pntr <= spm_val_pntr + (cmd_spm_nnz << 1); // Multiply length by 2
+
+            spmv_init_checksum <= spmv_init_checksum + 1; 
+        end
+        else if (ld_vec) begin
+            vec_pntr <= cmd_vec_pntr;
+
+            spmv_init_checksum <= spmv_init_checksum + 1;
+        end
+    end
+end
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// State Machine for FSM
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef enum reg [1:0] {
     IDLE,                   // Doing Nothing 
-    VECT_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
+    SPMV_INIT,              // Handle Grabbbing Vectors 
+    VEC_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
     COMPUTE_SPMV
 } spmv_state;
 
@@ -91,37 +144,48 @@ always_ff @ (posedge clk) begin
     else begin
         case (op_state) 
             IDLE: begin
-
+                if (cmd_hsk && (cmd_opcode==INIT_SPMV)) op_state <= SPMV_INIT;
             end
-            VECT_PREFETCH: begin
-
+            SPMV_INIT: begin
+                if (spmv_init_checksum == 2) op_state <= VEC_PREFETCH;
+            end
+            VEC_PREFETCH: begin
+                // Control signal from a memory control unit
             end
             COMPUTE_SPMV: begin
 
             end
             default: begin
-                
-            end
 
+            end
         endcase
     end
 end
 
-// State Output
+
+
+// State Outputs
 always @ (*) begin
     if (!rst_n) begin
-
+        init_spm_pntr = 0;
+        ld_spm_arr = 0;
+        ld_vec = 0;
     end
     else begin
       case (op_state)
           IDLE: begin
-
+              init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
           end
-          VECT_PREFETCH: begin
-
+          SPMV_INIT: begin
+              ld_spm_arr = cmd_hsk && (cmd == LD_SPM);
+              ld_vec = cmd_hsk && (cmd == LD_VEC);
+          end
+          VEC_PREFETCH: begin
+              // Output control for the vector prefetch from memory
+              // For instance take control of the memory unit (Shared between the pipeline and the computational channels) 
           end
           COMPUTE_SPMV: begin
-
+              // Associate Channel Control Logic for starting the computation
           end
           default : begin
 
@@ -225,7 +289,19 @@ This fetch needs to be queued so that we can continuously pull the values
   - Multiple channels each keeping track of the row id conversion done inside the channel fifo
 */
 
+/*
+First in idle state.
 
+1. Send command initialize SPMV with the SPM matrix pointer 
+
+2. Send the number of rows and the number of non-zero elements in the SPM (To separate steps in the initialize process)
+3. Send the pointer to the vector and the lenght of the vector 
+
+
+4. Begin the vector prefetching before the pipeline (Cannot begin until clock cycle after recieving the pointer to the vector and the lenght)
+
+5. Enter the pipeline 
+*/
 
 
 
