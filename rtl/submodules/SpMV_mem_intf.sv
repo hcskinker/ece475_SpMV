@@ -1,6 +1,6 @@
 "include dcp.h"
 
-module spmv_fetch #(
+module spmv_mem_intf #(
     .PARAM         (1) 
 ) (
     input  wire                              clk,
@@ -18,7 +18,7 @@ module spmv_fetch #(
     input  wire [`DCP_NOC_RES_DATA_SIZE-1:0] mem_resp_data //up to 64Bytes
 
     // Output 
-
+    
 );
 
 endmodule 
