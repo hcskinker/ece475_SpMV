@@ -8,6 +8,7 @@ module vec_file #(
     input  wire                              rst_n,
 
     // Prefetch Inputs 
+    input wire                               spmv_init,
     input wire                               prefetch,
     input wire [`DCP_PADDR_MASK]             vec_pntr,
     input wire [15:0]                        vec_len,
@@ -58,7 +59,7 @@ endgenerate
 ////////////////////////////////////////////////////////////////////////////////////////
 
 wire mem_req_hsk = mem_req_rdy && mem_req_val;
-wire mem_req_val = prefetch && !prefetch_req_done; 
+assign mem_req_val = prefetch && !prefetch_req_done; 
 wire is_first_line = mem_req_hsk && !(|trans_id);
 
 // Other Line Addresses (offset from cache aligned first line)
@@ -75,7 +76,7 @@ wire prefetch_req_done = (mem_req_transid == (vec_len-1));
 
 // Flip Flop to update the transaction ID
 always_ff @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || spmv_init) begin
         mem_req_transid <= 0;
     end
     else if (mem_req_hsk) begin 
@@ -107,7 +108,7 @@ endgenerate
 
 integer j;
 always_ff @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || spmv_init) begin
         vec_row <= '{default: '0};
         len_cnt <= 0;
     end

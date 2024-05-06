@@ -130,18 +130,19 @@ always_ff @ (posedge clk) begin
         endcase
     end
 end
-
+wire spmv_init;
 // State Outputs
 always @ (*) begin
     init_spm_pntr = 0;
     init_ld_spm_arr = 0;
     init_ld_vec = 0;
-    
+    spmv_init = 0; // Reset Signal for all other logic
     case (op_state)
         IDLE: begin
             init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
         end
         SPMV_INIT: begin
+            spmv_init = 1;
             init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM);
             init_ld_vec = cmd_hsk && (cmd == LD_VEC);
         end
@@ -166,7 +167,7 @@ end
 reg init_spm_pntr, init_ld_spm_arr, init_ld_vec; 
 
 reg [39:0] spm_val_pntr, spm_col_idx_pntr, spm_row_len_pntr, vec_pntr;
-reg [19:0] vec_len;
+reg [15:0] vec_len;
 reg [15:0] spm_nnz, spm_nzzr; 
 
 always_ff @ (poedge clk) begin
@@ -205,7 +206,9 @@ end
 // Vector Prefetching Control 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Sparse Matrix Element Access and Arbitration
+///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 endmodule

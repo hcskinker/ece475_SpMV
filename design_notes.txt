@@ -187,7 +187,15 @@ Two separate modules:
                 - When a valid response is recieved check the id and grab registers from that transaction
                 - For the request, we just are pushing a request every single cycle for the prefetch routine
         
+Fetching for the Sparse Matrix 
 
+Handling the Row Lengths
+
+Held in consecutive spaces in memory:
+
+Want to fetch each turn so that available in a row length Fifo 
+
+However 
         
 
 
