@@ -13,7 +13,7 @@ module vec_file #(
     input wire [15:0]                        vec_len,
 
     // Channel Inputs
-    input wire [15:0]                   col_idx_in [CHANNELS-1:0], 
+    input wire [15:0]                        col_idx_in [CHANNELS-1:0], 
 
     // Mem Req Signal Interface
     input  wire                              mem_req_rdy,
@@ -34,40 +34,99 @@ module vec_file #(
 
 );
 
-localparam LINE_VALS = `DCP_NOC_RES_DATA_SIZE / VEC_W; // Number of Values per line
+localparam VAL_PER_LINE = `DCP_NOC_RES_DATA_SIZE / VEC_W; // Number of Values per line
+localparam VAL_ALIGN = $clog2(VAL_PER_LINE);
+
+// Vector for all Registers
+reg [VEC_W-1:0] vec_row [1023:0]; 
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+// Return Vector Components to Channel
+////////////////////////////////////////////////////////////////////////////////////////
+
+genvar k;
+generate
+    for (k = 0; k < CHANNELS; k = k + 1) begin: channel_output_line
+        col_val_out[k] = vec_row[col_idx_in[k]];
+    end
+endgenerate 
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+// Prefetch Request Logic
+////////////////////////////////////////////////////////////////////////////////////////
 
 wire mem_req_hsk = mem_req_rdy && mem_req_val;
-wire mem_req_val = prefetch && !prefetch_done; 
-// wire mem_req_addr = vec_pntr + (mem_req_trans_id << LINE_VALS); // Send an address that is the trans_id offset (multiplexed)
+wire mem_req_val = prefetch && !prefetch_req_done; 
+wire is_first_line = mem_req_hsk && !(|trans_id);
 
-wire [`DCP_PADDR_MASK] first_addr = 
+// Other Line Addresses (offset from cache aligned first line)
+wire [`DCP_PADDR_MASK] line_addr = first_line_addr + (mem_req_trans_id << VAL_ALIGN); // Send an address that is the trans_id offset (multiplexed)
 
-// Decomposed into trans_id / cache_line
-typedef struct {
-    reg [5:0] trans_id;
-    reg [`DCP_NOC_RES_DATA_SIZE-1:0] cache_line;
-} cache_response;
+// First Line Address (align to cache line)
+wire [`DCP_PADDR_MASK] first_line_addr = vec_ptr & ((~40'd0) << 6);
+wire [3:0] line_off = vec_ptr[5:2];
 
-cache_response response_tbl [63:0];
+// Request Address
+wire mem_req_addr = is_first_line ? first_line_addr : line_addr;
 
-reg [VEC_W-1:0] vec_components [1023:0];  // Vector Register
+wire prefetch_req_done = (mem_req_transid == (vec_len-1));
 
-wire prefetch_done = (mem_req_transid == (vec_len-1));
-
-// Every clock cycle I want to send out a request for 
+// Flip Flop to update the transaction ID
 always_ff @(posedge clk) begin
     if (!rst_n) begin
-        response_tbl <= '{default: '0};
-        vec_components <= '{default: '0};
         mem_req_transid <= 0;
     end
-    else begin
-        if (mem_req_hsk) begin
+    else if (mem_req_hsk) begin 
+        if (prefetch_req_done) mem_req_trans_id <= 0; // Reset and 
+        else begin 
+            // Transaction ID Corresponds Directly to Ordering of Vector
             mem_req_transid <= mem_req_transid + 1;
-            if (prefect_done) mem_req_trans_id <= 0;
         end
     end
 end
+
+////////////////////////////////////////////////////////////////////////////////
+// Prefetch Response Logic 
+////////////////////////////////////////////////////////////////////////////////
+wire [3:0] const_vpl = VAL_PER_LINE;
+wire [3:0] first_line_length = const_vpl - line_off;
+
+wire [VEC_W-1:0] mem_data [VAL_PER_LINE-1:0];
+
+reg [15:0] len_cnt;
+wire vector_filled = (len_cnt >= vec_len);
+
+genvar i;
+generate
+    for (i = 0; i < VAL_PER_LINE; i = i + 1) begin: cache_split
+        mem_data[i] = mem_resp_data[(i+1)*VEC_W-1:i*VEC_W];
+    end
+endgenerate
+
+integer j;
+always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        vec_row <= '{default: '0};
+        len_cnt <= 0;
+    end
+    else if (prefetch && mem_resp_val) begin
+        if (mem_resp_transid == 0) begin
+            for (i=0; i < first_line_length; i = i + 1) begin
+                vec_row[mem_req_trans_id + i] <= mem_data[line_off+i];
+            end
+            len_cnt = len_cnt + first_line_length;
+        end
+        else begin
+            for (i=0; i < VAL_PER_LINE; i = i + 1) begin
+                vec_row[((mem_req_trans_id-1)<<VAL_ALIGN) + i + line_off] <= mem_data[i];
+            end
+            len_cnt = len_cnt + VAL_PER_LINE;
+        end
+    end
+end
+
 
 
 endmodule 
