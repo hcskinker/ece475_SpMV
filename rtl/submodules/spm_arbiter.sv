@@ -13,8 +13,8 @@ module spm_arbiter #(
     input  wire [39:0]                       spm_val_pntr,
     input  wire [39:0]                       spm_col_idx_pntr,
     input  wire [39:0]                       spm_row_len_pntr,
-    input  wire [15:0]                       spm_nnz,
-    input  wire [15:0]                       spm_nzzr,
+    input  wire [15:0]                       spm_nnz, // Number of Non-Zero Elements
+    input  wire [15:0]                       spm_nr, // Number of Rows
 
     // Mem Req Signal Interface
     input  wire                              mem_req_rdy,
@@ -31,13 +31,8 @@ module spm_arbiter #(
     output reg  [SPM_ELE_W-1:0]              spm_val        [CHAN_NUM-1:0],
     output reg  [SPM_ELE_W-1:0]              spm_row_len    [CHAN_NUM-1:0],
     output reg  [SPM_ELE_W-1:0]              spm_col_idx    [CHAN_NUM-1:0],
-    output wire                              spm_fetch_stall // Bubble signal if stall
+    output wire                              spm_fetch_stall // Bubble signal if stall (don't push values)
 );  
-
-// Mem Request Handshake
-wire mem_req_hsk = mem_req_rdy && mem_req_val;
-
-assign mem_req_val = !req_finished && spm_fetch; //Clock cycle start
 
 // Align to Cache
 wire [`DCP_PADDR_MASK] first_val_addr = spm_val_pntr & ((~40'd0) << 6);
@@ -48,38 +43,22 @@ wire [3:0] col_idx_offset = pm_col_idx_pntr[5:2];
 wire [3:0] len_offset = spm_row_len_pntr[5:2];
 
 wire first_fetch = (iteration==0);
-wire windup_stall = !(iteration > 1); // Windup turns off iteration 2 (corrected offset)
-wire fetch_stall;
+wire windup_stall = !(iteration > 1); 
 
-assign spm_fetch_stall = fetch_stall || windup_stall;
+assign spm_fetch_stall = !fetch_finished || windup_stall;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Memory Requests
 ///////////////////////////////////////////////////////////////////////////////
 
-reg [15:0] iteration;
+wire spm_fetch_done = (spm_nnz <= iteration*CHAN_NUM);
+wire mem_req_hsk = mem_req_rdy && mem_req_val;
 
-// Transaction ID is 0 - spm_values 1- spm_column_index 2-spm_row_length
+wire row_fetch_done = (spm_nr <= iteration*CHAN_NUM);
 
-always_ff @(posedge clk) begin
-    if(!rst_n || spmv_init) begin 
-        iteration <= 0; // If using for transaction count wait until fetch complete 
-        mem_req_transid <= 0; 
-    end
-    else if (spm_fetch && mem_req_hsk) begin
-        // Change transaction ID for each type of request
-        if (fetch_stall!) begin
-            if (mem_req_transid == 2'd3) begin
-                mem_req_transid <= 0;
-                iteration <= iteration + 1; // Iteration impacts memory offset
-                finish_req <= 1;
-            end
-            else begin 
-                mem_req_transid <= mem_req_transid + 1;
-            end
-        end
-    end
-end
+wire [1:0] max_transid = !row_fetch_done ? 2'b11 : 2'b10;
+
+assign mem_req_val = !req_finished && spm_fetch && !spm_fetch_done;
 
 wire [`DCP_PADDR_MASK] val_addr = first_val_addr + iteration*`DCP_NOC_RES_DATA_SIZE;
 wire [`DCP_PADDR_MASK] col_addr = first_col_addr + iteration*`DCP_NOC_RES_DATA_SIZE; 
@@ -88,6 +67,29 @@ wire [`DCP_PADDR_MASK] len_addr = first_len_addr + iteration*`DCP_NOC_RES_DATA_S
 assign mem_req_addr = (mem_req_transid == 0) ? val_addr :
                       (mem_req_transid == 1) ? col_addr :
                       (mem_req_transid == 2) ? len_addr : 40'b0;
+
+reg [15:0] iteration;
+reg req_finished;
+
+always_ff @(posedge clk) begin
+    if(!rst_n || spmv_init) begin 
+        mem_req_transid <= 0; 
+        req_finished <= 0;
+    end
+    else if (mem_req_hsk) begin
+        // Change transaction ID for each type of request
+        if (mem_req_transid == (max_transid-1)) begin
+            mem_req_transid <= 0;
+            req_finished <= 1;
+        end
+        else begin 
+            mem_req_transid <= mem_req_transid + 1;
+        end
+    end
+    else if (!req_finished && fetch_finished) begin
+        req_finished <= 0; // Reset Request Schedule 1 cycle after finishing (1 cycle delay)
+    end
+end
 
 ///////////////////////////////////////////////////////////////////////////////
 // Memory Responses 
@@ -98,7 +100,8 @@ reg fetch_finished;
 
 wire [SPM_ELE_W-1:0] mem_data [CHAN_NUM-1:0];
 
-assign fetch_stall = spm_fetch & finish_req & !(fetch_finished); // If fetching and request finished but not full response
+// Stall the fetch if we have not finished
+reg fetch_finished;
 
 // Partition the Data from memory
 genvar i;
@@ -114,23 +117,26 @@ reg [SPM_ELE_W-1:0] len_offset_queue [CHAN_NUM-1:0];
 
 always_ff @ (posedge clk) begin
     if(!rst_n || spmv_init) begin
+        iteration <= 0;
         spm_response_sum <= 0;
         fetch_finished <= 0;
     end
-    else if (spm_fetch && mem_resp_val) begin
+    else if (spm_fetch && mem_resp_val && !spm_fetch_done) begin
+        // Assume we will be finished if we have a mem_resp_val and the sum is already 2
         if (spm_response_sum == 2) begin
             spm_response_sum <= 0;
             iteration <= iteration + 1;
             fetch_finished <= 1;
         end 
         else begin
+            // Add 1 to response sum
             spm_response_sum <= spm_response_sum + 1;
             fetch_finished <= 0;
         end
         for (i=0; i < CHAN_NUM; i = i + 1) begin
             case (mem_resp_transid)
                 2'b00 : begin
-                    if ((iteration == 0) && (i >= val_offset)) begin
+                    if (first_fetch && (i >= val_offset)) begin
                         val_offset_queue[i-val_offset] <= mem_data[i];
                     end
                     else begin
@@ -142,7 +148,7 @@ always_ff @ (posedge clk) begin
                     end
                 end
                 2'b01 : begin
-                    if ((iteration == 0) && (i >= col_idx_offset)) begin
+                    if (first_fetch && (i >= col_idx_offset)) begin
                         col_offset_queue[i-col_idx_offset] <= mem_data[i];
                     end
                     else begin
@@ -154,7 +160,7 @@ always_ff @ (posedge clk) begin
                     end
                 end
                 2'b10 : begin
-                    if ((iteration == 0) && (i >= len_offset)) begin
+                    if (first_fetch && (i >= len_offset)) begin
                         len_offset_queue[i-len_offset] <= mem_data[i];
                     end
                     else begin
