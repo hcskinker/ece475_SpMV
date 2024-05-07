@@ -1,7 +1,7 @@
 //`include "dcp.h"
 //needs revision
 module spm_channel #( 
-    parameter SPM_ELE_W = 32,
+    parameter DATA_W = 32,
     parameter CHAN_NUM = 16
 
 ) (
@@ -9,28 +9,28 @@ module spm_channel #(
     input  wire                              rst_n,
 
     //inputs from decoder and BVB
-    input wire [SPM_ELE_W-1:0]               row_IDs_decoder_in,
-    input wire [SPM_ELE_W-1:0]               vector_values_BVB_in,
+    input wire [DATA_W-1:0]               row_IDs_decoder_in,
+    input wire [DATA_W-1:0]               vector_values_BVB_in,
     
     // inputs from arbiter
-    input wire  [SPM_ELE_W-1:0]              spm_val,
-    input wire  [SPM_ELE_W-1:0]              spm_row_len,
-    input wire  [SPM_ELE_W-1:0]              spm_col_idx,
+    input wire  [DATA_W-1:0]              spm_val,
+    input wire  [DATA_W-1:0]              spm_row_len,
+    input wire  [DATA_W-1:0]              spm_col_idx,
     input wire                               spm_fetch_stall, // Bubble signal if stall (don't push values)
     
     // Outputs 
-    output reg [SPM_ELE_W-1:0]               row_lengths_decoder_out,
-    output reg [SPM_ELE_W-1:0]               row_IDs_accumulator_out,
-    output reg [SPM_ELE_W-1:0]               mul_accumulator_out,
-    output reg [SPM_ELE_W-1:0]               col_IDs_BVB_out
+    output reg [DATA_W-1:0]               row_lengths_decoder_out,
+    output reg [DATA_W-1:0]               row_IDs_accumulator_out,
+    output reg [DATA_W-1:0]               mul_accumulator_out,
+    output reg [DATA_W-1:0]               col_IDs_BVB_out
 );
 
-reg [SPM_ELE_W-1:0]               mul_0;
-reg [SPM_ELE_W-1:0]               mul_1 ;
-reg [SPM_ELE_W-1:0]               mul_2;
-reg [SPM_ELE_W-1:0]               mul_3;
-reg [SPM_ELE_W-1:0]               bvb_in_buffer;
-reg [SPM_ELE_W-1:0]               spm_val_buffer;
+reg [DATA_W-1:0]               mul_0;
+reg [DATA_W-1:0]               mul_1 ;
+reg [DATA_W-1:0]               mul_2;
+reg [DATA_W-1:0]               mul_3;
+reg [DATA_W-1:0]               bvb_in_buffer;
+reg [DATA_W-1:0]               spm_val_buffer;
 // fetch
 
 always @(posedge clk ) begin 
