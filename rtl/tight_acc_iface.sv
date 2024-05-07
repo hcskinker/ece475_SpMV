@@ -23,20 +23,25 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-`include "dcp.h"
+`include "dcp.h" // Replace with a test file
 
 `ifdef DEFAULT_NETTYPE_NONE
 `default_nettype none
 `endif
 
+#define `MAX_DIM_LEN 1024 //Hardcoded Maximum Length for Vector
+#define `DIM_W       10 // Hardcoded (clog2(MAX_DIM_LEN))
+#define `NNZ_W       20 // Hardcoded (2*clog2(MAX_DIM_LEN))
+
 module tight_acc_iface #(
-    parameter CHANNELS = 16
+    parameter NUM_CH = 16,
+    parameter DATA_W = 32,
 )  (
     input  wire clk,
     input  wire rst_n,
     // Command iface to receive "instructions" and configurations
     input  wire                             cmd_val,        // New valid command
-    output wire                             busy,           // effectively behaves as cmd_rdy
+    output reg                              busy,           // effectively behaves as cmd_rdy
     input  wire [5:0]                       cmd_opcode,     // Command operation code, 64 values
     input  wire [63:0]                      cmd_config_data, // Payload of command if needed
 
@@ -57,8 +62,7 @@ module tight_acc_iface #(
     input  wire [`DCP_NOC_RES_DATA_SIZE-1:0] mem_resp_data //up to 64Bytes
 );
 
-// FILL ME
-assign busy = 1'b0;
+
 // assign mem_req_val = 1'b0;
 // assign mem_req_transid = 6'b0;
 // assign mem_req_addr = 40'd0;
@@ -68,8 +72,8 @@ assign resp_data = cmd_config_data;
 
 // Command Manager
 typedef enum reg[1:0] {
-    INIT_SPMV,          // Send the SPM Matrix pointer 
-    LD_SPM_DATA,            // Send the info regarding length
+    INIT_SPMV,           // Send the SPM Matrix pointer 
+    LD_SPM_DATA,         // Send the info regarding length
     LD_VEC_DATA          // Load the vector          
 } spmv_cmd;
 
@@ -81,24 +85,26 @@ wire cmd_hsk = !busy & cmd_val;
 // Command Parsing
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
 assign cmd = cmd_opcode[1:0];
 
 wire [`DCP_PADDR_MASK       ] cmd_spm_base_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
 wire [`DCP_PADDR_MASK       ] cmd_vec_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
-wire [15:0] cmd_vec_len = cmd_config_data[46:41]; // Vector length when sending over the pointer (16 bits)
-wire [15:0] cmd_spm_nnz = cmd_config_data[15:0];  // Non Zero Elements (16-bits)
-wire [15:0] cmd_spm_nnzr = cmd_config_data[31:16]; // Non Zero Rows (Simplify fetching the rows) (16 bits)
+wire [`DIM_W-1:0] cmd_vec_len = cmd_config_data[`DIM_W-1:40]; // Vector length when sending over the pointer (16 bits)
+wire [`NNZ_W-1:0] cmd_spm_nnz = cmd_config_data[`NNZ_W-1:0];  // Non Zero Elements (16-bits)
+wire [`DIM_W-1:0] cmd_spm_nr = cmd_config_data[`NNZ_W+`DIM_W-1:`NNZ_W]; // Non Zero Rows (Simplify fetching the rows) (16 bits)
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // State Machine for Commands and Operation
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-typedef enum reg [1:0] {
+typedef enum reg [2:0] {
     IDLE,                   // Doing Nothing 
     SPMV_INIT,              // Handle Grabbbing Vectors 
-    VEC_PREFETCH,          // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
-    COMPUTE_SPMV
+    VEC_PREFETCH,           // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
+    SPMV_COMPUTE,           // Compute the Sparse Matrix Vector Multiplication
+    SPMV_FINISHED           // Computation Finished 
 } spmv_state;
 
 spmv_state op_state;
@@ -107,6 +113,7 @@ reg [1:0] spmv_init_checksum; //Doesn't begin prefetching until Checksum = 2
 
 // Next State Logic and Inputs
 wire prefetch_done;
+wire output_full;
 
 always_ff @ (posedge clk) begin
     if (!rst_n) begin
@@ -124,8 +131,12 @@ always_ff @ (posedge clk) begin
                 // Control signal from a memory control unit
                 if(prefetch_done) op_state <= COMPUTE_SPMV;
             end
-            COMPUTE_SPMV: begin
-
+            SPMV_COMPUTE: begin
+                if(output_full) op_state <= SPMV_FINISHED;
+            end
+            SPMV_FINISHED: begin
+                if (output_empty) op_state <= IDLE;
+                else if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
             end
             default: begin
 
@@ -146,6 +157,7 @@ always @ (*) begin
     spmv_init = 0; // Reset Signal for all other logic
     spmv_prefetch = 0;
     spm_fetch = 0;
+    busy = 0;
     case (op_state)
         IDLE: begin
             init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
@@ -159,9 +171,12 @@ always @ (*) begin
             // Output control for the vector prefetch from memory
             spmv_prefetch = 1;
         end
-        COMPUTE_SPMV: begin
-            // Associate Channel Control Logic for starting the computation
-            spm_fetch = 1;
+        SPMV_COMPUTE: begin
+            spm_fetch = 1; // Arbiter Begins fetching SPM values
+            busy = 1; // Accelerator can no longer recieve commands
+        end
+        SPMV_FINISHED: begin
+
         end
         default : begin
 
@@ -178,7 +193,8 @@ reg init_spm_pntr, init_ld_spm_arr, init_ld_vec;
 
 reg [39:0] spm_val_pntr, spm_col_idx_pntr, spm_row_len_pntr, vec_pntr;
 reg [15:0] vec_len;
-reg [15:0] spm_nnz, spm_nr; 
+reg [`NNZ_W-1:0] spm_nnz; 
+reg [`DIM_W-1:0] spm_nr;
 
 always_ff @ (poedge clk) begin
     if (!rst_n) begin
@@ -196,7 +212,7 @@ always_ff @ (poedge clk) begin
         end
         else if (init_ld_spm_arr) begin
             spm_nnz <= cmd_spm_nnz;
-            spm_nr <= cmd_spm_nzzr;
+            spm_nr <= cmd_spm_nr;
 
             spm_col_idx_pntr <= spm_val_pntr + cmd_spm_nnz;
             spm_row_len_pntr <= spm_val_pntr + (cmd_spm_nnz << 1); // Multiply length by 2
@@ -223,8 +239,8 @@ wire [`DCP_PADDR_MASK       ] vec_mem_req_addr;
 wire [`DCP_NOC_RES_DATA_SIZE-1:0] vec_mem_resp_data;
 
 vec_file #(
-    .VEC_W                  (32),
-    .CHANNELS               (CHANNELS)
+    .VEC_W                  (DATA_W),
+    .NUM_CH               (NUM_CH)
 ) vec_file (
     .clk                    (clk),
     .rst_n                  (rst_n),
@@ -259,8 +275,8 @@ wire [`DCP_PADDR_MASK       ] spm_mem_req_addr;
 wire [`DCP_NOC_RES_DATA_SIZE-1:0] spm_mem_resp_data;
 
 spm_arbiter #(
-    .CHAN_NUM               (CHANNELS),
-    .SPM_ELE_W              (32)
+    .CHAN_NUM               (NUM_CH),
+    .SPM_ELE_W              (DATA_W)
 ) spm_arbiter (
     .clk                        (clk),
     .rst_n                      (rst_n),
@@ -285,7 +301,8 @@ spm_arbiter #(
     .spm_val                    (),                     // All Channel Pipe Info
     .spm_row_len                (),
     .spm_col_idx                (),
-    .spm_fetch_stall            ()                      // Insert Bubbles into Pipeline
+    .spm_fetch_stall            (),                     // Insert Bubbles into Pipeline
+    .spm_fetch_done             ()                      // Pass into Pipe to accumulator_done (Accumulator Tells When Finished)
 
 )
 
@@ -317,6 +334,52 @@ assign mem_req_addr = spmv_prefetch ? vec_mem_req_addr :
 // Channel Pipeline
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// CISR Decoder 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-]
+cisr_decoder #(
+    .NUM_CH                     (NUM_CH),
+    .DATA_W                     (DATA_W)
+) ( 
+    .clk                        (clk),
+    .rst_n                      (rst_n),
+
+    .spmv_init                  (spmv_init),
+    .row_len                    (),         // Row Buffer inputs
+    .pipe_bubble                (),         // Channel Pipe Bubble
+
+    .row_len_pop                (),         // Send to Pipe 
+    .row_idx_out                ()          // Send to Pipe 
+);
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Output Buffer (Regular Vector RegFile) Max Output Vector Length (Row Number): 1024
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+reg [DATA_W-1:0] output_vec [`MAX_DIM_LEN-1:0];
+reg [DATA_W-1:0] channel_out [NUM_CH-1:0]; // Output of the accumulators
+reg [`DIM_W:0] channel_row_idx [NUM_CH-1:0];
+reg [NUM_CH-1:0] channel_acc_done; //Connected to Computation Pipeline
+reg [`DIM_W-1:0] rows_calc;
+reg [`DIM_W-1:0] rows_retrive;
+
+assign output_full = (rows_calc >= spm_nr); // Full output vector if total rows
+
+always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        output_vec <= '{default: '0};
+        rows_calc <= 0;
+    end
+    else if (spmv_init) rows_calc <= 0;
+    else begin
+        for(i=0; i < NUM_CH; i=i+1) begin
+            if (channel_acc_done[i]) begin
+                output_vec[channel_row_idx[i]] <= channel_out[i];
+                rows_calc <= rows_calc + 1; // Counts total elements stored
+            end
+        end
+    end
+end
+
 endmodule

@@ -1,8 +1,8 @@
 "include dcp.h"
 
 module vec_file #(
-    parameter VEC_W      = 32,
-    parameter CHANNELS   = 16
+    parameter DATA_W      = 32,
+    parameter NUM_CH   = 16
 ) (
     input  wire                              clk,
     input  wire                              rst_n,
@@ -11,10 +11,10 @@ module vec_file #(
     input wire                               spmv_init,
     input wire                               prefetch,
     input wire [`DCP_PADDR_MASK]             vec_pntr,
-    input wire [15:0]                        vec_len,
+    input wire [`DIM_W-1:0]                  vec_len,
 
     // Channel Inputs
-    input wire [15:0]                        col_idx_in [CHANNELS-1:0], 
+    input wire [`DIM_W-1:0]                  col_idx_in [NUM_CH-1:0], 
 
     // Mem Req Signal Interface
     input  wire                              mem_req_rdy,
@@ -31,16 +31,15 @@ module vec_file #(
     output reg                               prefetch_done,
 
     // Channel Outputs
-    output reg [VEC_W-1:0]                   col_val_out [CHANNELS-1:0]    
+    output reg [DATA_W-1:0]                   col_val_out [NUM_CH-1:0]    
 
 );
 
-localparam VAL_PER_LINE = `DCP_NOC_RES_DATA_SIZE / VEC_W; // Number of Values per line
+localparam VAL_PER_LINE = `DCP_NOC_RES_DATA_SIZE / DATA_W; // Number of Values per line
 localparam VAL_ALIGN = $clog2(VAL_PER_LINE);
 
 // Vector for all Registers
-reg [VEC_W-1:0] vec_row [1023:0]; 
-
+reg [DATA_W-1:0] vec_row [1023:0]; 
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Return Vector Components to Channel
@@ -48,7 +47,7 @@ reg [VEC_W-1:0] vec_row [1023:0];
 
 genvar k;
 generate
-    for (k = 0; k < CHANNELS; k = k + 1) begin: channel_output_line
+    for (k = 0; k < NUM_CH; k = k + 1) begin: channel_output_line
         col_val_out[k] = vec_row[col_idx_in[k]];
     end
 endgenerate 
@@ -94,7 +93,7 @@ end
 wire [3:0] const_vpl = VAL_PER_LINE;
 wire [3:0] first_line_length = const_vpl - line_off;
 
-wire [VEC_W-1:0] mem_data [VAL_PER_LINE-1:0];
+wire [DATA_W-1:0] mem_data [VAL_PER_LINE-1:0];
 
 reg [15:0] len_cnt;
 wire vector_filled = (len_cnt >= vec_len);
@@ -102,7 +101,7 @@ wire vector_filled = (len_cnt >= vec_len);
 genvar i;
 generate
     for (i = 0; i < VAL_PER_LINE; i = i + 1) begin: cache_split
-        mem_data[i] = mem_resp_data[(i+1)*VEC_W-1:i*VEC_W];
+        mem_data[i] = mem_resp_data[(i+1)*DATA_W-1:i*DATA_W];
     end
 endgenerate
 

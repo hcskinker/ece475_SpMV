@@ -1,8 +1,8 @@
 "include dcp.h"
 
 module cisr_decoder #(
-    parameter CHAN_NUM = 16,
-    parameter LEN_W    = 32
+    parameter NUM_CH = 16,
+    parameter DATA_W    = 32
 ) (
     input  wire                    clk,
     input  wire                    rst_n,
@@ -11,22 +11,22 @@ module cisr_decoder #(
     input  wire                    spmv_init,
 
     // Inputs from the Row Len Buffer
-    input  wire [LEN_W-1:0]        row_len        [CHAN_NUM-1:0],
-    input  wire                    bubble,       // Bubble for all channels
+    input  wire [DATA_W-1:0]        row_len        [NUM_CH-1:0],
+    input  wire                    pipe_bubble,       // Bubble for all channels
     
     // Output Row_ids
-    output wire [CHAN_NUM-1:0]     row_len_pop,         // Indicates need another index
-    output wire [15:0]             row_idx_out    [CHAN_NUM-1:0]
+    output wire [NUM_CH-1:0]     row_len_pop,         // Indicates need another index
+    output wire [15:0]             row_idx_out    [NUM_CH-1:0]
 );
 
 reg default_row_idx;
 
-reg [LEN_W-1:0] row_len_count [CHAN_NUM-1:0];
-reg [15:0]  row_idx  [CHAN_NUM-1:0];
+reg [DATA_W-1:0] row_len_count [NUM_CH-1:0];
+reg [`DIM_W-1:0]  row_idx  [NUM_CH-1:0];
 
 genvar k;
 generate 
-    for (k=0; k < CHAN_NUM; k = k + 1) begin : row_len_pop_signal
+    for (k=0; k < NUM_CH; k = k + 1) begin : row_len_pop_signal
         assign row_len_pop[k] = (row_len_count == 0); // Still applies in default case as well
     end
 endgenerate
@@ -34,19 +34,18 @@ endgenerate
 // ROW ID Calculation
 integer i;
 integer j;
-reg 
 
 always @(posedge clk) begin
     idx_offset = 0;
     if(!rst_n || spmv_init) begin
         default_row_idx <= 1;
-        for (i=0; i < CHAN_NUM; i = i + 1) begin
+        for (i=0; i < NUM_CH; i = i + 1) begin
             row_idx[i] = i;
         end
     end
-    else if (!bubble) begin
+    else if (!pipe_bubble) begin
         default_row_idx <= 0; // First (Non-bubble) sets to zero
-        for (i=0; i < CHAN_NUM; i = i + 1) begin 
+        for (i=0; i < NUM_CH; i = i + 1) begin 
             if (default_row_idx) row_idx_out[i] <= row_idx[i]; // First Element load
             else begin
                 if (row_len_pop[i]) begin 
@@ -59,16 +58,16 @@ always @(posedge clk) begin
     end
 end
 
-localparam CHAN_W = $clog2(CHAN_NUM);
-reg [LEN_W-1:0] priority_val [CHAN_NUM-1:0];
+localparam CHAN_W = $clog2(NUM_CH);
+reg [DATA_W-1:0] priority_val [NUM_CH-1:0];
 reg [CHAN_W-1:0] priority_i;
 
 
 always @(*) begin
     priority_val = '{default: '0};
     priority_i = 0;
-    if (!bubble) begin
-        for (i=0; i < CHAN_NUM; i = i + 1) begin
+    if (!pipe_bubble) begin
+        for (i=0; i < NUM_CH; i = i + 1) begin
             if (row_len_pop[i]) begin
                 priority_val[i] = priority_i;
                 priority_i = priority_i + 1;
@@ -82,8 +81,8 @@ always_ff @(posedge clk) begin
     if(!rst_n || spmv_init) begin
         row_len_count <= '{default :'0};
     end
-    else if (!bubble) begin
-        for (i=0; i < CHAN_NUM; i = i + 1) begin 
+    else if (!pipe_bubble) begin
+        for (i=0; i < NUM_CH; i = i + 1) begin 
             if (row_len_pop[i]) row_len_count[i] <= row_len[i]; // If at zero load a new value
             else row_len_count <= row_len_count - 1; //
         end
