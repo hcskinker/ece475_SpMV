@@ -48,7 +48,7 @@ module tight_acc_iface #(
     // Interface to respond to the core after the accelerator has processed data
     output wire                             resp_val,
     input  wire                             resp_rdy, //whether the core is ready to take the data
-    output wire [63:0]                      resp_data,
+    output reg [63:0]                       resp_data,
 
     // Request iface to memory hierarchy
     input  wire                             mem_req_rdy, //whether the network is ready to take the request
@@ -74,7 +74,8 @@ assign resp_data = cmd_config_data;
 typedef enum reg[1:0] {
     INIT_SPMV,           // Send the SPM Matrix pointer 
     LD_SPM_DATA,         // Send the info regarding length
-    LD_VEC_DATA          // Load the vector          
+    LD_VEC_DATA,         // Load the vector  
+    GET_RESULT           // Return the Result       
 } spmv_cmd;
 
 spmv_cmd cmd;
@@ -85,7 +86,6 @@ wire cmd_hsk = !busy & cmd_val;
 // Command Parsing
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
 assign cmd = cmd_opcode[1:0];
 
 wire [`DCP_PADDR_MASK       ] cmd_spm_base_pntr = cmd_config_data[`DCP_PADDR_MASK       ]; //The physical address is 40 bits (configurable) 1TB
@@ -93,7 +93,6 @@ wire [`DCP_PADDR_MASK       ] cmd_vec_pntr = cmd_config_data[`DCP_PADDR_MASK    
 wire [`DIM_W-1:0] cmd_vec_len = cmd_config_data[`DIM_W-1:40]; // Vector length when sending over the pointer (16 bits)
 wire [`NNZ_W-1:0] cmd_spm_nnz = cmd_config_data[`NNZ_W-1:0];  // Non Zero Elements (16-bits)
 wire [`DIM_W-1:0] cmd_spm_nr = cmd_config_data[`NNZ_W+`DIM_W-1:`NNZ_W]; // Non Zero Rows (Simplify fetching the rows) (16 bits)
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // State Machine for Commands and Operation
@@ -135,8 +134,8 @@ always_ff @ (posedge clk) begin
                 if(output_full) op_state <= SPMV_FINISHED;
             end
             SPMV_FINISHED: begin
-                if (output_empty) op_state <= IDLE;
-                else if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
+                if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
+                else if (result_returned) op_state <= IDLE;
             end
             default: begin
 
@@ -146,9 +145,7 @@ always_ff @ (posedge clk) begin
 end
 
 // State Outputs
-reg spmv_init;
-reg spmv_prefetch;
-reg spm_fetch;
+reg spmv_init, spmv_prefetch, spm_fetch, get_result;
 
 always @ (*) begin
     init_spm_pntr = 0;
@@ -157,6 +154,7 @@ always @ (*) begin
     spmv_init = 0; // Reset Signal for all other logic
     spmv_prefetch = 0;
     spm_fetch = 0;
+    resp_val = 0;
     busy = 0;
     case (op_state)
         IDLE: begin
@@ -164,8 +162,8 @@ always @ (*) begin
         end
         SPMV_INIT: begin
             spmv_init = 1;
-            init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM);
-            init_ld_vec = cmd_hsk && (cmd == LD_VEC);
+            init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM_DATA);
+            init_ld_vec = cmd_hsk && (cmd == LD_VEC_DATA);
         end
         VEC_PREFETCH: begin
             // Output control for the vector prefetch from memory
@@ -176,7 +174,8 @@ always @ (*) begin
             busy = 1; // Accelerator can no longer recieve commands
         end
         SPMV_FINISHED: begin
-
+            get_result = cmd_hsk && (cmd == LD_SPM_DATA);
+            busy = !(results_returned) && retrieve_en; // Falls as soon as last cycle
         end
         default : begin
 
@@ -240,7 +239,7 @@ wire [`DCP_NOC_RES_DATA_SIZE-1:0] vec_mem_resp_data;
 
 vec_file #(
     .VEC_W                  (DATA_W),
-    .NUM_CH               (NUM_CH)
+    .NUM_CH                 (NUM_CH)
 ) vec_file (
     .clk                    (clk),
     .rst_n                  (rst_n),
@@ -334,6 +333,9 @@ assign mem_req_addr = spmv_prefetch ? vec_mem_req_addr :
 // Channel Pipeline
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 // CISR Decoder 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -362,7 +364,6 @@ reg [DATA_W-1:0] channel_out [NUM_CH-1:0]; // Output of the accumulators
 reg [`DIM_W:0] channel_row_idx [NUM_CH-1:0];
 reg [NUM_CH-1:0] channel_acc_done; //Connected to Computation Pipeline
 reg [`DIM_W-1:0] rows_calc;
-reg [`DIM_W-1:0] rows_retrive;
 
 assign output_full = (rows_calc >= spm_nr); // Full output vector if total rows
 
@@ -378,6 +379,33 @@ always_ff @(posedge clk) begin
                 output_vec[channel_row_idx[i]] <= channel_out[i];
                 rows_calc <= rows_calc + 1; // Counts total elements stored
             end
+        end
+    end
+end
+
+wire core_resp_hsk = resp_val && resp_rdy;
+assign resp_val = retrieve_en;
+assign result_returned = (rows_retrieved == (rows_calc-1)) && core_resp_hsk; // Next clock cycle reset
+
+// Result Communication to the Core 
+
+reg [`DIM_W-1:0] rows_retrieved;
+always_ff @(posedge clk) begin
+    if (!rst_n || spm_init) begin
+        resp_data <= 0;
+        retrieve_en <= 0;
+        rows_retrieved <= 0;
+    end
+    else begin
+        if (get_result) retrieve_en <= 1; // Activate the result retrieval
+        else if (result_returned) begin 
+            retrieve_en <= 1;
+            rows_retrieved <= 0;
+        end
+
+        if (core_resp_hsk) begin
+            resp_data <= output_vec[rows_retrieved];
+            rows_retrieved <= rows_retrieved + 1;
         end
     end
 end
