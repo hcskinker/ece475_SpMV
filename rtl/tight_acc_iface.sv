@@ -227,6 +227,63 @@ always_ff @ (poedge clk) begin
     end
 end
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Channel Pipeline
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Multi-channel Inputs
+wire [`DIM_W-1:0]  cisr_decoder_row_id [NUM_CH-1:0];
+wire [DATA_W-1:0]  vec_val_in [NUM_CH-1:0];
+
+wire [DATA_W-1:0]  spm_val [NUM_CH-1:0];
+wire [DATA_W-1:0]  spm_row_len [NUM_CH-1:0];
+wire [DATA_W-1:0]  spm_col_idx [NUM_CH-1:0];
+
+wire [NUM_CH-1:0]  decoder_pop_len;
+
+wire [NUM_CH-1:0] last_not_valid;
+
+// Multi-Channel Outputs
+wire [DATA_W-1:0]  decoder_row_lens             [NUM_CH-1:0];
+wire [`DIM_W-1:0]  row_IDS_accumulator_out      [NUM_CH-1:0];
+wire [DATA_W-1:0]  mul_accumulator_out          [NUM_CH-1:0];
+wire [`DIM_W-1:0]  col_IDs_BVB_out              [NUM_CH-1:0];
+
+wire [NUM_CH-1:0] pipe_fetch_bubble;
+
+// Fanned Input
+wire spm_fetch_stall;
+
+genvar h;
+generate 
+    for (h=0; h < NUM_CH; h=h+1) begin: create_parallel_channels
+        spm_channel #(
+            .NUM_CH                     (NUM_CH),
+            .DATA_W                     (DATA_W)
+        ) spm_channel (
+            .clk                        (clk),
+            .rst_n                      (rst_n),
+            .spmv_init                  (spmv_init),
+
+            .row_IDs_decoder_in         (cisr_decoder_row_id[h]),
+            .vector_values_BVB_in       (vec_val_in[h]),
+            .decoder_pop_len            (decoder_pop_len[h]),
+
+            .spm_val                    (spm_val[h]),
+            .spm_row_len                (spm_row_len[h]),
+            .spm_col_idx                (spm_col_idx[h]),
+            .spm_fetch_stall            (spm_fetch_stall || last_not_valid[h]), // Each pipe can have a bubble
+
+            .decoder_row_lens_out       (decoder_row_lens[h]),
+            .row_IDS_accumulator_out    (row_IDs_accumulator_out[h]),
+            .mul_accumulator_out        (mul_accumulator_out[h]),
+            .col_IDs_BVB_out            (col_IDs_BVB_out[h]),
+
+            .pipe_fetch_bubble          (pipe_fetch_bubble[h]) // Can have separate channel bubbles at end of computation
+        );
+    end
+endgenerate
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 // Vector Prefetching Control 
@@ -249,7 +306,7 @@ vec_file #(
     .vec_pntr               (vec_pntr),
     .vec_len                (vec_len),
 
-    .col_idx_in             (), // Connected to Channel Pipeline Stage
+    .col_idx_in             (col_IDs_BVB_out), // Connected to Channel Pipeline Stage
 
     .mem_req_rdy            (vec_mem_req_rdy),
     .mem_req_val            (vec_mem_req_val),
@@ -261,7 +318,7 @@ vec_file #(
     .mem_resp_data          (vec_mem_resp_data),
 
     .prefetch_done          (prefetch_done),
-    .col_val_out            ()
+    .col_val_out            (vec_val_in)
 );
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -280,6 +337,7 @@ spm_arbiter #(
     .clk                        (clk),
     .rst_n                      (rst_n),
 
+    // Sparse Matrix Data Inputs
     .spmv_init                  (spmv_init),
     .spm_fetch                  (spm_fetch),
     .spm_val_pntr               (spm_val_pntr),
@@ -288,20 +346,24 @@ spm_arbiter #(
     .spm_nnz                    (spm_nnz),
     .spm_nr                     (spm_nr),
 
+    // NoC1 Interface
     .mem_req_rdy                (spm_mem_req_rdy),
     .mem_req_val                (spm_mem_req_val),
     .mem_req_transid            (spm_mem_req_transid),
     .mem_req_addr               (spm_mem_req_addr),
 
+    // NoC2 Inputs
     .mem_resp_val               (spm_mem_resp_val),
     .mem_resp_transid           (spm_mem_resp_transid),
     .mem_resp_data              (spm_mem_resp_data),
 
-    .spm_val                    (),                     // All Channel Pipe Info
-    .spm_row_len                (),
-    .spm_col_idx                (),
-    .spm_fetch_stall            (),                     // Insert Bubbles into Pipeline
-    .spm_fetch_done             ()                      // Pass into Pipe to accumulator_done (Accumulator Tells When Finished)
+    // Outputs
+    .spm_val                    (spm_val),                     // All Channel Pipe Info
+    .spm_row_len                (spm_row_len),
+    .spm_col_idx                (spm_col_idx),
+    .spm_fetch_stall            (spm_fetch_stall),                     // Insert Bubbles into Pipeline
+    .last_not_valid             ()
+    .spm_fetch_done             (),                      // Pass into Pipe to accumulator_done (Accumulator Tells When Finished)
 
 )
 
@@ -330,13 +392,6 @@ assign mem_req_addr = spmv_prefetch ? vec_mem_req_addr :
                       spm_fetch     ? spm_mem_req_addr : 0;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
-// Channel Pipeline
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
 // CISR Decoder 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -347,12 +402,14 @@ cisr_decoder #(
     .clk                        (clk),
     .rst_n                      (rst_n),
 
+    // Inputs
     .spmv_init                  (spmv_init),
-    .row_len                    (),         // Row Buffer inputs
-    .pipe_bubble                (),         // Channel Pipe Bubble
+    .row_len                    (decoder_row_lens),         // Row Buffer inputs
+    .pipe_bubble                (pipe_fetch_bubble),        // Channel Pipe Bubble (For different channels)
 
-    .row_len_pop                (),         // Send to Pipe 
-    .row_idx_out                ()          // Send to Pipe 
+    // Outputs
+    .row_len_pop                (decoder_pop_len),         // Send to Pipe 
+    .row_idx_out                (cisr_decoder_row_id)          // Send to Pipe 
 );
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////

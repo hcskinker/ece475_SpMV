@@ -11,11 +11,11 @@ module cisr_decoder #(
     input  wire                    spmv_init,
 
     // Inputs from the Row Len Buffer
-    input  wire [DATA_W-1:0]        row_len        [NUM_CH-1:0],
-    input  wire                    pipe_bubble,       // Bubble for all channels
+    input  wire [DATA_W-1:0]       row_len        [NUM_CH-1:0],
+    input  wire [NUM_CH-1:0]       pipe_bubble,    // Bubble for all channels
     
     // Output Row_ids
-    output wire [NUM_CH-1:0]     row_len_pop,         // Indicates need another index
+    output wire [NUM_CH-1:0]       row_len_pop,         // Indicates need another index
     output wire [15:0]             row_idx_out    [NUM_CH-1:0]
 );
 
@@ -35,6 +35,8 @@ endgenerate
 integer i;
 integer j;
 
+
+// Edit so Pipe Bubble is Channel Dependent
 always @(posedge clk) begin
     idx_offset = 0;
     if(!rst_n || spmv_init) begin
@@ -43,18 +45,20 @@ always @(posedge clk) begin
             row_idx[i] = i;
         end
     end
-    else if (!pipe_bubble) begin
-        default_row_idx <= 0; // First (Non-bubble) sets to zero
+    else begin
         for (i=0; i < NUM_CH; i = i + 1) begin 
-            if (default_row_idx) row_idx_out[i] <= row_idx[i]; // First Element load
-            else begin
-                if (row_len_pop[i]) begin 
-                    row_idx_out[i] <= priority_val[i] + avail_idx; // Don't update ID until pop
-                    idx_offset = idx_offset + 1;    
+            if (!pipe_bubble[i]) begin
+                default_row_idx <= 0; // After the first non-bubble initialize all row_idx to channel num
+                if (default_row_idx) row_idx_out[i] <= row_idx[i]; // First Element load
+                else begin
+                    if (row_len_pop[i]) begin 
+                        row_idx_out[i] <= priority_val[i] + avail_idx; // Don't update ID until pop
+                        idx_offset = idx_offset + 1;    
+                    end
                 end
             end
         end
-        avail_idx <= avail_idx + idx_offset;
+    avail_idx <= avail_idx + idx_offset; // Update available row ids, won't change if bubble
     end
 end
 
@@ -63,11 +67,12 @@ reg [DATA_W-1:0] priority_val [NUM_CH-1:0];
 reg [CHAN_W-1:0] priority_i;
 
 
+// Priority Encoder for the New Row Idx assignment
 always @(*) begin
     priority_val = '{default: '0};
     priority_i = 0;
-    if (!pipe_bubble) begin
-        for (i=0; i < NUM_CH; i = i + 1) begin
+    for (i=0; i < NUM_CH; i = i + 1) begin
+        if (!pipe_bubble[i]) begin
             if (row_len_pop[i]) begin
                 priority_val[i] = priority_i;
                 priority_i = priority_i + 1;
@@ -81,10 +86,12 @@ always_ff @(posedge clk) begin
     if(!rst_n || spmv_init) begin
         row_len_count <= '{default :'0};
     end
-    else if (!pipe_bubble) begin
+    else begin
         for (i=0; i < NUM_CH; i = i + 1) begin 
-            if (row_len_pop[i]) row_len_count[i] <= row_len[i]; // If at zero load a new value
-            else row_len_count <= row_len_count - 1; //
+            if (!pipe_bubble[i]) begin
+                if (row_len_pop[i]) row_len_count[i] <= row_len[i]; // If at zero load a new value
+                else row_len_count <= row_len_count - 1; //
+            end
         end
     end
 end
