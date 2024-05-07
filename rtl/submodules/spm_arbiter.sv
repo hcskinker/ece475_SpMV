@@ -115,6 +115,7 @@ reg [SPM_ELE_W-1:0] val_offset_queue [CHAN_NUM-1:0]; // Holds the Offset Values
 reg [SPM_ELE_W-1:0] col_offset_queue [CHAN_NUM-1:0];
 reg [SPM_ELE_W-1:0] len_offset_queue [CHAN_NUM-1:0];
 
+integer i;
 always_ff @ (posedge clk) begin
     if(!rst_n || spmv_init) begin
         iteration <= 0;
