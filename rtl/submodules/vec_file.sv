@@ -115,7 +115,7 @@ always_ff @(posedge clk) begin
     else if (prefetch && mem_resp_val) begin
         if (mem_resp_transid == 0) begin
             for (i=0; i < first_line_length; i = i + 1) begin
-                vec_row[mem_req_trans_id + i] <= mem_data[line_off+i];
+                vec_row[i] <= mem_data[line_off+i];
             end
             len_cnt = len_cnt + first_line_length;
         end
