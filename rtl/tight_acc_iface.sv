@@ -59,9 +59,9 @@ module tight_acc_iface #(
 
 // FILL ME
 assign busy = 1'b0;
-assign mem_req_val = 1'b0;
-assign mem_req_transid = 6'b0;
-assign mem_req_addr = 40'd0;
+// assign mem_req_val = 1'b0;
+// assign mem_req_transid = 6'b0;
+// assign mem_req_addr = 40'd0;
 // FOO implementation, respond untouched every command
 assign resp_val = cmd_val;
 assign resp_data = cmd_config_data; 
@@ -70,7 +70,7 @@ assign resp_data = cmd_config_data;
 typedef enum reg[1:0] {
     INIT_SPMV,          // Send the SPM Matrix pointer 
     LD_SPM_DATA,            // Send the info regarding length
-    LD_VEC_DATA          // Load the vecto          
+    LD_VEC_DATA          // Load the vector          
 } spmv_cmd;
 
 spmv_cmd cmd;
@@ -105,7 +105,9 @@ spmv_state op_state;
 
 reg [1:0] spmv_init_checksum; //Doesn't begin prefetching until Checksum = 2
 
-// Next State Logic 
+// Next State Logic and Inputs
+wire prefetch_done;
+
 always_ff @ (posedge clk) begin
     if (!rst_n) begin
         op_state <= IDLE;
@@ -120,6 +122,7 @@ always_ff @ (posedge clk) begin
             end
             VEC_PREFETCH: begin
                 // Control signal from a memory control unit
+                if(prefetch_done) op_state <= COMPUTE_SPMV;
             end
             COMPUTE_SPMV: begin
 
@@ -130,13 +133,19 @@ always_ff @ (posedge clk) begin
         endcase
     end
 end
-wire spmv_init;
+
 // State Outputs
+reg spmv_init;
+reg spmv_prefetch;
+reg spm_fetch;
+
 always @ (*) begin
     init_spm_pntr = 0;
     init_ld_spm_arr = 0;
     init_ld_vec = 0;
     spmv_init = 0; // Reset Signal for all other logic
+    spmv_prefetch = 0;
+    spm_fetch = 0;
     case (op_state)
         IDLE: begin
             init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
@@ -148,10 +157,11 @@ always @ (*) begin
         end
         VEC_PREFETCH: begin
             // Output control for the vector prefetch from memory
-            // For instance take control of the memory unit (Shared between the pipeline and the computational channels) 
+            spmv_prefetch = 1;
         end
         COMPUTE_SPMV: begin
             // Associate Channel Control Logic for starting the computation
+            spm_fetch = 1;
         end
         default : begin
 
@@ -168,7 +178,7 @@ reg init_spm_pntr, init_ld_spm_arr, init_ld_vec;
 
 reg [39:0] spm_val_pntr, spm_col_idx_pntr, spm_row_len_pntr, vec_pntr;
 reg [15:0] vec_len;
-reg [15:0] spm_nnz, spm_nzzr; 
+reg [15:0] spm_nnz, spm_nr; 
 
 always_ff @ (poedge clk) begin
     if (!rst_n) begin
@@ -177,7 +187,7 @@ always_ff @ (poedge clk) begin
         spm_col_idx_pntr <= 0;
         spm_row_len_pntr <= 0;
         spm_nnz <= 0;
-        spm_nnzr <= 0;
+        spm_nr <= 0;
     end
     else begin
         if (init_spm_pntr) begin
@@ -186,7 +196,7 @@ always_ff @ (poedge clk) begin
         end
         else if (init_ld_spm_arr) begin
             spm_nnz <= cmd_spm_nnz;
-            spm_nnzr <= cmd_spm_nzzr;
+            spm_nr <= cmd_spm_nzzr;
 
             spm_col_idx_pntr <= spm_val_pntr + cmd_spm_nnz;
             spm_row_len_pntr <= spm_val_pntr + (cmd_spm_nnz << 1); // Multiply length by 2
@@ -202,13 +212,111 @@ always_ff @ (poedge clk) begin
     end
 end
 
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 // Vector Prefetching Control 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+wire vec_mem_req_rdy, vec_mem_req_val, vec_mem_resp_val;
+wire [5:0] vec_mem_req_transid, vec_mem_resp_transid;
+wire [`DCP_PADDR_MASK       ] vec_mem_req_addr;
+wire [`DCP_NOC_RES_DATA_SIZE-1:0] vec_mem_resp_data;
+
+vec_file #(
+    .VEC_W                  (32),
+    .CHANNELS               (CHANNELS)
+) vec_file (
+    .clk                    (clk),
+    .rst_n                  (rst_n),
+
+    .spmv_init              (spmv_init),
+    .prefetch               (spmv_prefetch),
+    .vec_pntr               (vec_pntr),
+    .vec_len                (vec_len),
+
+    .col_idx_in             (), // Connected to Channel Pipeline Stage
+
+    .mem_req_rdy            (vec_mem_req_rdy),
+    .mem_req_val            (vec_mem_req_val),
+    .mem_req_transid        (vec_mem_req_transid),
+    .mem_req_addr           (vec_mem_req_addr),
+
+    .mem_resp_val           (vec_mem_resp_val),
+    .mem_resp_transid       (vec_mem_resp_transid),
+    .mem_resp_data          (vec_mem_resp_data),
+
+    .prefetch_done          (prefetch_done),
+    .col_val_out            ()
+);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 // Sparse Matrix Element Access and Arbitration
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
+wire spm_mem_req_rdy, spm_mem_req_val, spm_mem_resp_val;
+wire [5:0] spm_mem_req_transid, spm_mem_resp_transid;
+wire [`DCP_PADDR_MASK       ] spm_mem_req_addr;
+wire [`DCP_NOC_RES_DATA_SIZE-1:0] spm_mem_resp_data;
 
+spm_arbiter #(
+    .CHAN_NUM               (CHANNELS),
+    .SPM_ELE_W              (32)
+) spm_arbiter (
+    .clk                        (clk),
+    .rst_n                      (rst_n),
+
+    .spmv_init                  (spmv_init),
+    .spm_fetch                  (spm_fetch),
+    .spm_val_pntr               (spm_val_pntr),
+    .spm_col_idx_pntr           (spm_col_idx_pntr),
+    .spm_row_len_pntr           (spm_row_len_pntr),
+    .spm_nnz                    (spm_nnz),
+    .spm_nr                     (spm_nr),
+
+    .mem_req_rdy                (spm_mem_req_rdy),
+    .mem_req_val                (spm_mem_req_val),
+    .mem_req_transid            (spm_mem_req_transid),
+    .mem_req_addr               (spm_mem_req_addr),
+
+    .mem_resp_val               (spm_mem_resp_val),
+    .mem_resp_transid           (spm_mem_resp_transid),
+    .mem_resp_data              (spm_mem_resp_data),
+
+    .spm_val                    (),                     // All Channel Pipe Info
+    .spm_row_len                (),
+    .spm_col_idx                (),
+    .spm_fetch_stall            ()                      // Insert Bubbles into Pipeline
+
+)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// NoC1 and NoC2 Multiplexing Between Sparse Matrix Element Access and Vector Prefetch
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Demux NoC1 Inputs
+assign vec_mem_req_rdy = spmv_prefetch ? mem_req_rdy : 0;
+assign spm_mem_req_rdy = spm_fetch ? mem_req_rdy : 0;
+
+// Demux NoC2 Response
+assign vec_mem_resp_val = spmv_prefetch ? mem_resp_val : 0;
+assign spm_mem_resp_val = spm_fetch ? mem_resp_val : 0;
+assign vec_mem_resp_transid = spmv_prefetch ? mem_resp_transid : 0;
+assign spm_mem_resp_transid = spm_fetch ? mem_resp_transid : 0;
+assign vec_mem_resp_data = spmv_prefetch ? mem_resp_data : 0;
+assign spm_mem_resp_data = spm_fetch ? mem_resp_data : 0;
+
+// Mux NoC1 Outputs 
+assign mem_req_val = spmv_prefetch ? vec_mem_req_val :
+                     spm_fetch     ? spm_mem_req_val : 0;
+assign mem_req_transid = spmv_prefetch ? vec_mem_req_transid :
+                         spm_fetch     ? spm_mem_req_transid : 0;
+assign mem_req_addr = spmv_prefetch ? vec_mem_req_addr :
+                      spm_fetch     ? spm_mem_req_addr : 0;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Channel Pipeline
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+]
 endmodule
