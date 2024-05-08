@@ -23,15 +23,18 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-`include "dcp.h" // Replace with a test file
+//`include "dcp.h" // Replace with a test file
 
-`ifdef DEFAULT_NETTYPE_NONE
+`include "dcp_mock.svh"
+`include "./submodules/spm_arbiter.sv"
+`include "./submodules/spm_channel.sv"
+`include "./submodules/spm_cisr_decoder.sv"
+`include "./submodules/vec_file.sv"
+
+`ifdef DEFAULT_NETTYPE_NONE 
 `default_nettype none
 `endif
 
-#define `MAX_DIM_LEN 1024 //Hardcoded Maximum Length for Vector
-#define `DIM_W       10 // Hardcoded (clog2(MAX_DIM_LEN))
-#define `NNZ_W       20 // Hardcoded (2*clog2(MAX_DIM_LEN))
 
 module tight_acc_iface #(
     parameter NUM_CH = 16,
@@ -249,6 +252,8 @@ wire [`DIM_W-1:0]  row_IDS_accumulator_out      [NUM_CH-1:0];
 wire [DATA_W-1:0]  mul_accumulator_out          [NUM_CH-1:0];
 wire [`DIM_W-1:0]  col_IDs_BVB_out              [NUM_CH-1:0];
 
+reg [NUM_CH-1:0] channel_acc_done; //Connected to Computation Pipeline
+
 wire [NUM_CH-1:0] pipe_fetch_bubble;
 
 // Fanned Input
@@ -278,6 +283,7 @@ generate
             .row_IDS_accumulator_out    (row_IDs_accumulator_out[h]),
             .mul_accumulator_out        (mul_accumulator_out[h]),
             .col_IDs_BVB_out            (col_IDs_BVB_out[h]),
+            .acc_new                    (channel_acc_done[h]),
 
             .pipe_fetch_bubble          (pipe_fetch_bubble[h]) // Can have separate channel bubbles at end of computation
         );
@@ -419,7 +425,6 @@ cisr_decoder #(
 reg [DATA_W-1:0] output_vec [`MAX_DIM_LEN-1:0];
 reg [DATA_W-1:0] channel_out [NUM_CH-1:0]; // Output of the accumulators
 reg [`DIM_W:0] channel_row_idx [NUM_CH-1:0];
-reg [NUM_CH-1:0] channel_acc_done; //Connected to Computation Pipeline
 reg [`DIM_W-1:0] rows_calc;
 
 assign output_full = (rows_calc >= spm_nr); // Full output vector if total rows

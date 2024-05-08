@@ -1,5 +1,7 @@
-//`include "dcp.h"
+`include "dcp_mock.svh"
+`include "./row_fifo.sv"
 //needs revision
+
 module spm_channel #( 
     parameter DATA_W = 32,
     parameter CHAN_NUM = 16
@@ -26,6 +28,8 @@ module spm_channel #(
     output wire [`DIM_W-1:0]              row_IDs_accumulator_out,
     output reg  [DATA_W-1:0]              mul_accumulator_out,
     output reg  [`DIM_W-1:0]              col_IDs_BVB_out,
+
+    output reg  [NUM_CH-1:0]              acc_new,
 
     output reg                            pipe_fetch_bubble               
 );
@@ -155,15 +159,16 @@ end
 wire [`DIM_W-1:0] next_row_idx = M3_row_idx;
 reg [`DIM_W-1:0] acc_row_idx;
 reg [DATA_W-1:0] mul_accumulator;
-reg acc_new;
+reg acc_new, flushed;
 always @(posedge clk ) begin
     if (!rst_n || spmv_init) begin
         mul_accumulator <= 0;
         acc_row_idx <= 0;
         acc_new <= 0;
+        flushed <= 0;
     end
     else begin
-        acc_done <= 0;
+        acc_new <= 0;
         if (!M3_bubble) begin
             acc_row_idx <= next_row_idx;
             if (acc_row_idx != next_row_idx) begin // if new row index
@@ -174,7 +179,12 @@ always @(posedge clk ) begin
             else begin
                 mul_accumulator <= mul_accumulator + mul3; // Otherwise add the result in the pipeline to accumulator
             end
-        end
+        end 
+        else if(M3_done && !flushed) begin
+            mul_accumulator_out <= mul_accumulator; // Send the old accumulation value for row
+            acc_new <= 1;
+            flushed <= 1;
+        end 
     end
 end
 

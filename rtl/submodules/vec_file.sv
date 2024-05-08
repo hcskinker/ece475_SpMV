@@ -1,4 +1,4 @@
-"include dcp.h"
+`include "dcp_mock.svh"
 
 module vec_file #(
     parameter DATA_W      = 32,

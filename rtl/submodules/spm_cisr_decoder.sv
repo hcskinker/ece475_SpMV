@@ -1,4 +1,4 @@
-"include dcp.h"
+`include "dcp_mock.svh"
 
 module cisr_decoder #(
     parameter NUM_CH = 16,

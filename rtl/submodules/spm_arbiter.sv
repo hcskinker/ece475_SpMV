@@ -1,8 +1,8 @@
-"include dcp.h"
+`include "../dcp_mock.svh"
 
 module spm_arbiter #(
     parameter NUM_CH = 16, 
-    parameter DATA_W = 32,
+    parameter DATA_W = 32
 ) (
     input  wire                             clk,
     input  wire                             rst_n,
@@ -36,6 +36,8 @@ module spm_arbiter #(
     output reg                               spm_fetch_done
 );
 
+assign mem_req_transid[5:2] = 0;
+
 // Type for Transaction ID's Improve Readability
 typedef enum logic [1:0]{
     VALUE,
@@ -48,7 +50,7 @@ wire [`DCP_PADDR_MASK] first_val_addr = spm_val_pntr & ((~40'd0) << 6);
 wire [`DCP_PADDR_MASK] first_col_addr = spm_col_idx_pntr & ((~40'd0) << 6);
 wire [`DCP_PADDR_MASK] first_len_addr = spm_row_len_pntr & ((~40'd0) << 6);
 wire [3:0] val_offset = spm_val_pntr[5:2]; 
-wire [3:0] col_idx_offset = pm_col_idx_pntr[5:2];
+wire [3:0] col_idx_offset = spm_col_idx_pntr[5:2];
 wire [3:0] len_offset = spm_row_len_pntr[5:2];
 
 wire first_fetch = (iteration==0);
@@ -78,9 +80,9 @@ wire [1:0] max_transid = !row_fetch_done ? 2'b11 : 2'b10;
 
 assign mem_req_val = !req_finished && spm_fetch && !spm_fetch_stop;
 
-wire [`DCP_PADDR_MASK] val_addr = first_val_addr + iteration<<ALIGN;
-wire [`DCP_PADDR_MASK] col_addr = first_col_addr + iteration<<ALIGN; 
-wire [`DCP_PADDR_MASK] len_addr = first_len_addr + iteration<<ALIGN;
+wire [`DCP_PADDR_MASK] val_addr = first_val_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN;
+wire [`DCP_PADDR_MASK] col_addr = first_col_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN; 
+wire [`DCP_PADDR_MASK] len_addr = first_len_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN;
 
 assign mem_req_addr = (mem_req_trans == VALUE)   ? val_addr :
                       (mem_req_trans == COL_IDX) ? col_addr :
@@ -123,10 +125,10 @@ reg fetch_finished;
 wire [DATA_W-1:0] mem_data [NUM_CH-1:0];
 
 // Partition the Data from memory
-genvar i;
+genvar j;
 generate
-    for (i = 0; i < NUM_CH; i = i + 1) begin: cache_split
-        mem_data[i] = mem_resp_data[(i+1)*DATA_W-1:i*DATA_W];
+    for (j = 0; j < NUM_CH; j = j + 1) begin: cache_split
+        assign mem_data[j] = mem_resp_data[(j+1)*DATA_W-1:j*DATA_W];
     end
 endgenerate
 
@@ -134,11 +136,10 @@ reg [DATA_W-1:0] val_offset_queue [NUM_CH-1:0]; // Holds the Offset Values
 reg [DATA_W-1:0] col_offset_queue [NUM_CH-1:0];
 reg [DATA_W-1:0] len_offset_queue [NUM_CH-1:0];
 
-wire last_overflow = spm_nnz[ALIGN-1:0];
+wire [ALIGN-1:0] last_overflow = spm_nnz[ALIGN-1:0];
 
-wire last_fetch = (spm_nzz >= (iteration-1)<<ALIGN); // Same thing as multiplying by NUM_CH
+wire last_fetch = (spm_nnz >= {{(`NNZ_W-`DIM_W){'0}}, (iteration-10'd1)}<<ALIGN); // Same thing as multiplying by NUM_CH
 
-integer i;
 always_ff @ (posedge clk) begin
     if(!rst_n || spmv_init) begin
         iteration <= 0;
@@ -146,6 +147,7 @@ always_ff @ (posedge clk) begin
         fetch_finished <= 0;
         spm_fetch_stop <= 0;
         spm_fetch_done <= 0;
+        last_not_valid <= 0;
     end
     else begin
         spm_fetch_stop <= last_fetch;
@@ -163,7 +165,7 @@ always_ff @ (posedge clk) begin
                 spm_response_sum <= spm_response_sum + 1;
                 fetch_finished <= 0;
             end
-            for (i=0; i < NUM_CH; i = i + 1) begin
+            for (int i=0; i < NUM_CH; i = i + 1) begin
                 case (mem_resp_trans)
                     VALUE : begin
                         if (first_fetch && (i >= val_offset)) begin
@@ -182,7 +184,7 @@ always_ff @ (posedge clk) begin
                             col_offset_queue[i-col_idx_offset] <= mem_data[i];
                         end
                         else begin
-                            if (i < offset) spm_col_idx[(NUM_CH - col_idx_offset)+i] <= mem_data[i];
+                            if (i < col_idx_offset) spm_col_idx[(NUM_CH - col_idx_offset)+i] <= mem_data[i];
                             else begin
                                 spm_col_idx[i-col_idx_offset] <= col_offset_queue[i-col_idx_offset];
                                 col_offset_queue[i-col_idx_offset] <=  mem_data[i];
@@ -194,7 +196,7 @@ always_ff @ (posedge clk) begin
                             len_offset_queue[i-len_offset] <= mem_data[i];
                         end
                         else begin
-                            if (i < offset) spm_row_len[(NUM_CH - len_offset)+i] <= mem_data[i];
+                            if (i < len_offset) spm_row_len[(NUM_CH - len_offset)+i] <= mem_data[i];
                             else begin
                                 spm_row_len[i-len_offset] <= len_offset_queue[i-len_offset];
                                 len_offset_queue[i-len_offset] <= mem_data[i];
@@ -207,11 +209,11 @@ always_ff @ (posedge clk) begin
             end
         end
         else if (spm_fetch_stop && !spm_fetch_done) begin
-            for (i=0; i<NUM_CH; i = i + 1) begin
+            for (int i=0; i<NUM_CH; i = i + 1) begin
                  spm_val[i] <= val_offset_queue[i];
                  spm_col_idx[i] <= col_offset_queue[i];
                  spm_row_len[i] <= len_offset_queue[i];
-                 if (i>= last_overflow) last_not_valid[i];
+                 if (i>= last_overflow) last_not_valid[i] <= 1;
             end
         end
     end
