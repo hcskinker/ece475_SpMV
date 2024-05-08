@@ -1,4 +1,4 @@
-`include "dcp_mock.svh"
+`include "../dcp_mock.svh"
 
 module cisr_decoder #(
     parameter NUM_CH = 16,
@@ -16,26 +16,28 @@ module cisr_decoder #(
     
     // Output Row_ids
     output wire [NUM_CH-1:0]       row_len_pop,         // Indicates need another index
-    output wire [15:0]             row_idx_out    [NUM_CH-1:0]
+    output reg  [`DIM_W-1:0]       row_idx_out    [NUM_CH-1:0]
 );
+
+localparam CHAN_W = $clog2(NUM_CH);
 
 reg default_row_idx;
 
-reg [DATA_W-1:0] row_len_count [NUM_CH-1:0];
+reg [DATA_W-1:0]  row_len_count [NUM_CH-1:0];
 reg [`DIM_W-1:0]  row_idx  [NUM_CH-1:0];
 
 genvar k;
 generate 
     for (k=0; k < NUM_CH; k = k + 1) begin : row_len_pop_signal
-        assign row_len_pop[k] = (row_len_count == 0); // Still applies in default case as well
+        assign row_len_pop[k] = (row_len_count[k] == 0); // Still applies in default case as well
     end
 endgenerate
 
 // ROW ID Calculation
 integer i;
-integer j;
 
-
+reg [CHAN_W-1:0] idx_offset;
+reg [`DIM_W-1:0] avail_idx; // Pointer to the next available row_id for all channels
 // Edit so Pipe Bubble is Channel Dependent
 always @(posedge clk) begin
     idx_offset = 0;
@@ -62,7 +64,6 @@ always @(posedge clk) begin
     end
 end
 
-localparam CHAN_W = $clog2(NUM_CH);
 reg [DATA_W-1:0] priority_val [NUM_CH-1:0];
 reg [CHAN_W-1:0] priority_i;
 
@@ -90,7 +91,7 @@ always_ff @(posedge clk) begin
         for (i=0; i < NUM_CH; i = i + 1) begin 
             if (!pipe_bubble[i]) begin
                 if (row_len_pop[i]) row_len_count[i] <= row_len[i]; // If at zero load a new value
-                else row_len_count <= row_len_count - 1; //
+                else row_len_count[i] <= row_len_count[i] - 1; //
             end
         end
     end

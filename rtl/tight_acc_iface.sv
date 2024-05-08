@@ -404,7 +404,7 @@ assign mem_req_addr = spmv_prefetch ? vec_mem_req_addr :
 cisr_decoder #(
     .NUM_CH                     (NUM_CH),
     .DATA_W                     (DATA_W)
-) ( 
+) cisr_decoder ( 
     .clk                        (clk),
     .rst_n                      (rst_n),
 
