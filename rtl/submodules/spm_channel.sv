@@ -1,11 +1,10 @@
-`include "dcp_mock.svh"
+`include "../dcp_mock.svh"
 `include "./row_fifo.sv"
 //needs revision
 
 module spm_channel #( 
     parameter DATA_W = 32,
-    parameter CHAN_NUM = 16
-
+    parameter NUM_CH = 16
 ) (
     input  wire                           clk,
     input  wire                           rst_n,
@@ -27,11 +26,10 @@ module spm_channel #(
     output wire [DATA_W-1:0]              decoder_row_lens_out,  
     output wire [`DIM_W-1:0]              row_IDs_accumulator_out,
     output reg  [DATA_W-1:0]              mul_accumulator_out,
-    output reg  [`DIM_W-1:0]              col_IDs_BVB_out,
 
     output reg  [NUM_CH-1:0]              acc_new,
 
-    output reg                            pipe_fetch_bubble               
+    output wire                           pipe_fetch_bubble               
 );
 
 wire reset = !rst_n || spmv_init;
@@ -61,7 +59,7 @@ reg [DATA_W-1:0]               mul_0;
 reg [DATA_W-1:0]               mul_1 ;
 reg [DATA_W-1:0]               mul_2;
 reg [DATA_W-1:0]               mul_3;
-reg [DATA_W-1:0]               bvb_in_buffer;
+reg [DATA_W-1:0]               vector_value;
 reg [DATA_W-1:0]               spm_val_buffer;
 
 // Bubble Register (Nullify operation)
@@ -70,6 +68,8 @@ reg fetch_bubble, M0_bubble, M1_bubble, M2_bubble, M3_bubble;
 // Finished Register
 reg fetch_done, M0_done, M1_done, M2_done, M3_done;
 
+assign pipe_fetch_bubble = fetch_bubble;
+
 // Fetch
 always @(posedge clk ) begin 
     if (!rst_n || spmv_init) begin
@@ -77,8 +77,7 @@ always @(posedge clk ) begin
         fetch_done <= 0;
     end
     else if (!spm_fetch_stall) begin
-        spm_row_len;  // send to CISR Decoder
-        col_IDs_BVB_out <= spm_col_idx; // send to BVB
+        vector_value <= vector_values_BVB_in;
         spm_val_buffer <= spm_val; // Matrix Values from arbiter
         fetch_bubble <= 0;
         fetch_done <= spm_fetch_done;
@@ -98,7 +97,7 @@ always @(posedge clk ) begin
     end
     else begin
         if (!fetch_bubble) begin
-            mul_0 <= spm_val_buffer * vector_values_BVB_in; 
+            mul_0 <= spm_val_buffer * vector_value; 
             M0_row_idx <= row_IDs_decoder_in; // Row ID for the CISR Decoder
         end// Vector Value retrieved from Col_ID
         M0_bubble <= fetch_bubble;
@@ -159,7 +158,7 @@ end
 wire [`DIM_W-1:0] next_row_idx = M3_row_idx;
 reg [`DIM_W-1:0] acc_row_idx;
 reg [DATA_W-1:0] mul_accumulator;
-reg acc_new, flushed;
+reg flushed;
 always @(posedge clk ) begin
     if (!rst_n || spmv_init) begin
         mul_accumulator <= 0;
@@ -172,12 +171,12 @@ always @(posedge clk ) begin
         if (!M3_bubble) begin
             acc_row_idx <= next_row_idx;
             if (acc_row_idx != next_row_idx) begin // if new row index
-                mul_accumulator <= mul3; // Start accumulator with multiplication result
+                mul_accumulator <= mul_3; // Start accumulator with multiplication result
                 mul_accumulator_out <= mul_accumulator; // Send the old accumulation value for row
                 acc_new <= 1;
             end 
             else begin
-                mul_accumulator <= mul_accumulator + mul3; // Otherwise add the result in the pipeline to accumulator
+                mul_accumulator <= mul_accumulator + mul_3; // Otherwise add the result in the pipeline to accumulator
             end
         end 
         else if(M3_done && !flushed) begin

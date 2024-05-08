@@ -1,5 +1,7 @@
 `include "../dcp_mock.svh"
 
+// Data Module to Handle Fetch the Sparse Matrix Values, Column Indexs, and Row Lengths from Memory
+
 module spm_arbiter #(
     parameter NUM_CH = 16, 
     parameter DATA_W = 32
@@ -45,7 +47,7 @@ typedef enum logic [1:0]{
     ROW_LEN
 } trans_type;
 
-// Align to Cache
+// Align all of the Data Arrays to Cache
 wire [`DCP_PADDR_MASK] first_val_addr = spm_val_pntr & ((~40'd0) << 6);
 wire [`DCP_PADDR_MASK] first_col_addr = spm_col_idx_pntr & ((~40'd0) << 6);
 wire [`DCP_PADDR_MASK] first_len_addr = spm_row_len_pntr & ((~40'd0) << 6);
@@ -53,10 +55,13 @@ wire [3:0] val_offset = spm_val_pntr[5:2];
 wire [3:0] col_idx_offset = spm_col_idx_pntr[5:2];
 wire [3:0] len_offset = spm_row_len_pntr[5:2];
 
+// First Fetch important for initial data storage (loading the offset buffers first)
 wire first_fetch = (iteration==0);
-wire windup_stall = !(iteration > 1); 
+wire windup_stall = !(iteration > 1); // Windup allows the first fetch to fill the offset buffers and then on second fetch output data
 
-assign spm_fetch_stall = !fetch_finished || windup_stall || spm_fetch_done; // Stall after done with whole fetch
+
+// Stall when not all the Sparse Matrix Data for the 16 slots are ready
+assign spm_fetch_stall = !fetch_finished || windup_stall || spm_fetch_done; 
 
 ///////////////////////////////////////////////////////////////////////////////
 // Memory Requests
@@ -74,23 +79,30 @@ reg spm_fetch_stop;
 
 wire mem_req_hsk = mem_req_rdy && mem_req_val;
 
+// Row Length Fetching will be finished before fetching all the non-zero values 
+// Save time by not asking for row_lengths
 wire row_fetch_done = (spm_nr <= iteration*NUM_CH);
 
+// When done fetching row_lengths only increment transaction ID Twice 
 wire [1:0] max_transid = !row_fetch_done ? 2'b11 : 2'b10;
 
+// Wait to issue a new set of requests until get all three responses back
 assign mem_req_val = !req_finished && spm_fetch && !spm_fetch_stop;
 
 wire [`DCP_PADDR_MASK] val_addr = first_val_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN;
 wire [`DCP_PADDR_MASK] col_addr = first_col_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN; 
 wire [`DCP_PADDR_MASK] len_addr = first_len_addr + {{(40-`DIM_W){'0}}, iteration}<<ALIGN;
 
+// Iteration Through which request address to issue 
 assign mem_req_addr = (mem_req_trans == VALUE)   ? val_addr :
                       (mem_req_trans == COL_IDX) ? col_addr :
                       (mem_req_trans == ROW_LEN) ? len_addr : 40'b0;
 
+// Iteration Counts the number of memory cache retrieval for all Sparse Matrix Values
 reg [`DIM_W-1:0] iteration;
-reg req_finished;
+reg req_finished; 
 
+// Issue three requests at a time corresponding to Values, Column Indices, and Row Lens (Before empty)
 always_ff @(posedge clk) begin
     if(!rst_n || spmv_init) begin 
         mem_req_trans <= 0; 
@@ -119,12 +131,13 @@ end
 trans_type mem_resp_trans = mem_resp_transid[1:0];
 
 // Signals for Finished Fetches
-reg [1:0] spm_response_sum; 
+reg [1:0] spm_response_sum; // Sum counts number of responses allows responses to be out of order
 reg fetch_finished;
 
 wire [DATA_W-1:0] mem_data [NUM_CH-1:0];
 
 // Partition the Data from memory
+// Divide into 16 slots
 genvar j;
 generate
     for (j = 0; j < NUM_CH; j = j + 1) begin: cache_split
@@ -132,6 +145,8 @@ generate
     end
 endgenerate
 
+// Since array starting addresses can be misaligned to the cache line need offset registers
+// To adjust the slot alignment to the cache alignment so that on every fetch we have all 16 slots from memory
 reg [DATA_W-1:0] val_offset_queue [NUM_CH-1:0]; // Holds the Offset Values
 reg [DATA_W-1:0] col_offset_queue [NUM_CH-1:0];
 reg [DATA_W-1:0] len_offset_queue [NUM_CH-1:0];
@@ -147,16 +162,17 @@ always_ff @ (posedge clk) begin
         fetch_finished <= 0;
         spm_fetch_stop <= 0;
         spm_fetch_done <= 0;
-        last_not_valid <= 0;
+        last_not_valid <= 0; // Last not valid is used for the last transaction and fetching overflow, sets invalid bits for output array for pipeline to insert bubbles
     end
     else begin
+        // Last fetch occurs on the last fetch
         spm_fetch_stop <= last_fetch;
         spm_fetch_done <= spm_fetch_stop; // Asserted when nothing else is flowing
         if (spm_fetch && mem_resp_val && !spm_fetch_stop) begin
             // Assume we will be finished if we have a mem_resp_val and the sum is already 2
-            if (spm_response_sum == 2) begin
+            if (spm_response_sum == (max_transid-1)) begin
                 spm_response_sum <= 0;
-                iteration <= iteration + 1;
+                iteration <= iteration + 1; // Increment iteration count only after recieved three responses
                 fetch_finished <= 1;
                 last_not_valid <= 0;
             end 
@@ -165,14 +181,19 @@ always_ff @ (posedge clk) begin
                 spm_response_sum <= spm_response_sum + 1;
                 fetch_finished <= 0;
             end
+            // Same storage pattern for each 
             for (int i=0; i < NUM_CH; i = i + 1) begin
                 case (mem_resp_trans)
                     VALUE : begin
+                        // If first fetch only store values above the offset in offset array 
                         if (first_fetch && (i >= val_offset)) begin
                             val_offset_queue[i-val_offset] <= mem_data[i];
                         end
+                        // Maintaining Data's slot alignment when fetching across cache lines
                         else begin
+                            //  For values less then the offset, they get output to channel pipeline immediately
                             if (i < val_offset) spm_val[(NUM_CH - val_offset)+i] <= mem_data[i];
+                            // For values above offset value, store in the offset array for output next iteration
                             else begin 
                                 spm_val[i-val_offset] <= val_offset_queue[i-val_offset];
                                 val_offset_queue[i-val_offset] <=  mem_data[i];
@@ -208,6 +229,7 @@ always_ff @ (posedge clk) begin
                 endcase  
             end
         end
+        // Iteration after last fetch where values still in offset buffer. Push into pipeline and invalidate other values
         else if (spm_fetch_stop && !spm_fetch_done) begin
             for (int i=0; i<NUM_CH; i = i + 1) begin
                  spm_val[i] <= val_offset_queue[i];

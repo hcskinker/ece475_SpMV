@@ -50,7 +50,7 @@ module row_fifo #(
         if (reset) begin
             rd_ptr <= 0;
         end else if (rd_en && !empty) begin
-            rd_ptr <= (rd_ptr + 1)
+            rd_ptr <= (rd_ptr + 1);
             fifo_count <= fifo_count - 1;
         end
     end

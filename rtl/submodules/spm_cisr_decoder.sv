@@ -1,5 +1,9 @@
 `include "../dcp_mock.svh"
 
+/*
+Decoder Module the Interleaved Sparse Representation (CISR)
+*/
+
 module cisr_decoder #(
     parameter NUM_CH = 16,
     parameter DATA_W    = 32
@@ -11,21 +15,24 @@ module cisr_decoder #(
     input  wire                    spmv_init,
 
     // Inputs from the Row Len Buffer
-    input  wire [DATA_W-1:0]       row_len        [NUM_CH-1:0],
-    input  wire [NUM_CH-1:0]       pipe_bubble,    // Bubble for all channels
+    input  wire [DATA_W-1:0]       row_len        [NUM_CH-1:0], // Input from each channels row lenght fifo
+    input  wire [NUM_CH-1:0]       pipe_bubble,    // Bubble in Channel's Fetch Pipeline
     
     // Output Row_ids
-    output wire [NUM_CH-1:0]       row_len_pop,         // Indicates need another index
-    output reg  [`DIM_W-1:0]       row_idx_out    [NUM_CH-1:0]
+    output wire [NUM_CH-1:0]       row_len_pop,    // Indicates need another index
+    output reg  [`DIM_W-1:0]       row_idx_out    [NUM_CH-1:0] // Output Indices to Tell Accumulator which row it is summing to
 );
 
-localparam CHAN_W = $clog2(NUM_CH);
+localparam CHAN_W = $clog2(NUM_CH); // Bits required to store the channel numbers
 
+// Initial Signal to indicate each channel should be assigned its index at the start of computation
 reg default_row_idx;
 
 reg [DATA_W-1:0]  row_len_count [NUM_CH-1:0];
 reg [`DIM_W-1:0]  row_idx  [NUM_CH-1:0];
 
+// Checks for if Row Lenght Counter is Zero 
+// When zero give it a new value 
 genvar k;
 generate 
     for (k=0; k < NUM_CH; k = k + 1) begin : row_len_pop_signal
@@ -46,14 +53,19 @@ always @(posedge clk) begin
         for (i=0; i < NUM_CH; i = i + 1) begin
             row_idx[i] = i;
         end
+        avail_idx <= CHAN_NUM;
     end
     else begin
         for (i=0; i < NUM_CH; i = i + 1) begin 
             if (!pipe_bubble[i]) begin
                 default_row_idx <= 0; // After the first non-bubble initialize all row_idx to channel num
-                if (default_row_idx) row_idx_out[i] <= row_idx[i]; // First Element load
+                if (default_row_idx) begin 
+                    avail_idx <= CHAN_NUM;
+                    row_idx_out[i] <= row_idx[i]; // First Element load
+                end
                 else begin
                     if (row_len_pop[i]) begin 
+                        // Use encoder to decide 
                         row_idx_out[i] <= priority_val[i] + avail_idx; // Don't update ID until pop
                         idx_offset = idx_offset + 1;    
                     end
@@ -69,6 +81,8 @@ reg [CHAN_W-1:0] priority_i;
 
 
 // Priority Encoder for the New Row Idx assignment
+// If several channels need new row ids use a priority encoder based on channel index to assign how large 
+// of a new row id to allocate based of the current id available for next use
 always @(*) begin
     priority_val = '{default: '0};
     priority_i = 0;

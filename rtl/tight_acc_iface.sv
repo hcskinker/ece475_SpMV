@@ -82,7 +82,7 @@ typedef enum reg[1:0] {
 } spmv_cmd;
 
 spmv_cmd cmd;
-wire cmd_hsk = !busy & cmd_val;
+wire cmd_hsk = !busy & cmd_val; // Command Hanshake with Processor 
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -103,7 +103,7 @@ wire [`DIM_W-1:0] cmd_spm_nr = cmd_config_data[`NNZ_W+`DIM_W-1:`NNZ_W]; // Non Z
 
 typedef enum reg [2:0] {
     IDLE,                   // Doing Nothing 
-    SPMV_INIT,              // Handle Grabbbing Vectors 
+    SPMV_INIT,              // Handle Grabbing Vectors 
     VEC_PREFETCH,           // Grab the Dense Vector (Assume that the size is the same as a cache line (max two unlocal memory access))     
     SPMV_COMPUTE,           // Compute the Sparse Matrix Vector Multiplication
     SPMV_FINISHED           // Computation Finished 
@@ -119,14 +119,16 @@ wire output_full;
 
 always_ff @ (posedge clk) begin
     if (!rst_n) begin
-        op_state <= IDLE;
+        op_state <= IDLE; // Default State 
     end
     else begin
         case (op_state) 
             IDLE: begin
+                // API Command To Initialize Computation
                 if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
             end
             SPMV_INIT: begin
+                // If all the data has been loaded begin Prefetching Vector
                 if (spmv_init_checksum == 2) op_state <= VEC_PREFETCH;
             end
             VEC_PREFETCH: begin
@@ -134,11 +136,13 @@ always_ff @ (posedge clk) begin
                 if(prefetch_done) op_state <= COMPUTE_SPMV;
             end
             SPMV_COMPUTE: begin
+                // Once the output buffer for the result vector is full go to finished state
                 if(output_full) op_state <= SPMV_FINISHED;
             end
             SPMV_FINISHED: begin
+                // If there is a new command to start another initialization begin
                 if (cmd_hsk && (cmd==INIT_SPMV)) op_state <= SPMV_INIT;
-                else if (result_returned) op_state <= IDLE;
+                else if (result_returned) op_state <= IDLE; // Otherwise go to IDLE state
             end
             default: begin
 
@@ -163,21 +167,25 @@ always @ (*) begin
         IDLE: begin
             init_spm_pntr = cmd_hsk && (cmd==INIT_SPMV);
         end
+        // SPMV Init signal resets all of the modules to default values to prepare for operation
         SPMV_INIT: begin
             spmv_init = 1;
             init_ld_spm_arr = cmd_hsk && (cmd == LD_SPM_DATA);
             init_ld_vec = cmd_hsk && (cmd == LD_VEC_DATA);
         end
+        // State to fetch the whole vector from memory before computing (Much faster than iterative calls to memory )
         VEC_PREFETCH: begin
             // Output control for the vector prefetch from memory
             spmv_prefetch = 1;
         end
+        // Compute the Sparse Matrix Vector Product
         SPMV_COMPUTE: begin
             spm_fetch = 1; // Arbiter Begins fetching SPM values
             busy = 1; // Accelerator can no longer recieve commands
         end
+        // Computation Finished
         SPMV_FINISHED: begin
-            get_result = cmd_hsk && (cmd == LD_SPM_DATA);
+            get_result = cmd_hsk && (cmd == LD_SPM_DATA); // Enable the processor to begin asking for values
             busy = !(results_returned) && retrieve_en; // Falls as soon as last cycle
         end
         default : begin
@@ -209,20 +217,20 @@ always_ff @ (poedge clk) begin
     end
     else begin
         if (init_spm_pntr) begin
-            spm_val_pntr <= cmd_spm_base_pntr;
+            spm_val_pntr <= cmd_spm_base_pntr; // Load the Sparse Matrixes Base Vector
             spmv_init_checksum <= 0; // Reset every initialization call
         end
         else if (init_ld_spm_arr) begin
-            spm_nnz <= cmd_spm_nnz;
-            spm_nr <= cmd_spm_nr;
+            spm_nnz <= cmd_spm_nnz; // Load the number of non-zero values
+            spm_nr <= cmd_spm_nr; // Number of row lengths 
 
-            spm_col_idx_pntr <= spm_val_pntr + cmd_spm_nnz;
+            spm_col_idx_pntr <= spm_val_pntr + cmd_spm_nnz; // Store the pointers
             spm_row_len_pntr <= spm_val_pntr + (cmd_spm_nnz << 1); // Multiply length by 2
 
-            spmv_init_checksum <= spmv_init_checksum + 1; 
+            spmv_init_checksum <= spmv_init_checksum + 1; // Add to the Checksum
         end
         else if (init_ld_vec) begin
-            vec_pntr <= cmd_vec_pntr;
+            vec_pntr <= cmd_vec_pntr; // 
             vec_len <= cmd_vec_len;
 
             spmv_init_checksum <= spmv_init_checksum + 1;
@@ -270,20 +278,22 @@ generate
             .rst_n                      (rst_n),
             .spmv_init                  (spmv_init),
 
+            // Inputs from other modules
             .row_IDs_decoder_in         (cisr_decoder_row_id[h]),
-            .vector_values_BVB_in       (vec_val_in[h]),
-            .decoder_pop_len            (decoder_pop_len[h]),
+            .vector_values_BVB_in       (vec_val_in[h]), // Comes from the vec_file
+            .decoder_pop_len            (decoder_pop_len[h]), // Comes from the decoder
 
-            .spm_val                    (spm_val[h]),
-            .spm_row_len                (spm_row_len[h]),
-            .spm_col_idx                (spm_col_idx[h]),
-            .spm_fetch_stall            (spm_fetch_stall || last_not_valid[h]), // Each pipe can have a bubble
+            // Inputs
+            .spm_val                    (spm_val[h]), // Values in the Sparse Matrix 
+            .spm_row_len                (spm_row_len[h]), // Row lengths 
+            .spm_fetch_stall            (spm_fetch_stall || last_not_valid[h]), // Each pipe can have a bubble if the last value 
 
-            .decoder_row_lens_out       (decoder_row_lens[h]),
-            .row_IDS_accumulator_out    (row_IDs_accumulator_out[h]),
-            .mul_accumulator_out        (mul_accumulator_out[h]),
-            .col_IDs_BVB_out            (col_IDs_BVB_out[h]),
-            .acc_new                    (channel_acc_done[h]),
+            // Outputs 
+            .decoder_row_lens_out       (decoder_row_lens[h]), // Row lengths going to the Decoder
+            .row_IDS_accumulator_out    (row_IDs_accumulator_out[h]), // Row IDs 
+            .mul_accumulator_out        (mul_accumulator_out[h]), // Accumulators Out
+            .col_IDs_BVB_out            (col_IDs_BVB_out[h]), // Column IDs to the Vector File
+            .acc_new                    (channel_acc_done[h]), // New values available from the accumulator 
 
             .pipe_fetch_bubble          (pipe_fetch_bubble[h]) // Can have separate channel bubbles at end of computation
         );
@@ -300,6 +310,7 @@ wire [5:0] vec_mem_req_transid, vec_mem_resp_transid;
 wire [`DCP_PADDR_MASK       ] vec_mem_req_addr;
 wire [`DCP_NOC_RES_DATA_SIZE-1:0] vec_mem_resp_data;
 
+// Buffer Storing all of the Vector Elements
 vec_file #(
     .VEC_W                  (DATA_W),
     .NUM_CH                 (NUM_CH)
@@ -307,12 +318,12 @@ vec_file #(
     .clk                    (clk),
     .rst_n                  (rst_n),
 
-    .spmv_init              (spmv_init),
+    .spmv_init              (spmv_init), 
     .prefetch               (spmv_prefetch),
     .vec_pntr               (vec_pntr),
     .vec_len                (vec_len),
 
-    .col_idx_in             (col_IDs_BVB_out), // Connected to Channel Pipeline Stage
+    .col_idx_in             (spm_col_idx), // Connected to Channel Pipeline Stage
 
     .mem_req_rdy            (vec_mem_req_rdy),
     .mem_req_val            (vec_mem_req_val),
@@ -336,6 +347,7 @@ wire [5:0] spm_mem_req_transid, spm_mem_resp_transid;
 wire [`DCP_PADDR_MASK       ] spm_mem_req_addr;
 wire [`DCP_NOC_RES_DATA_SIZE-1:0] spm_mem_resp_data;
 
+// Arbiter For Fetching the Sparse Matrix Values 
 spm_arbiter #(
     .CHAN_NUM               (NUM_CH),
     .SPM_ELE_W              (DATA_W)
@@ -422,13 +434,13 @@ cisr_decoder #(
 // Output Buffer (Regular Vector RegFile) Max Output Vector Length (Row Number): 1024
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-reg [DATA_W-1:0] output_vec [`MAX_DIM_LEN-1:0];
-reg [DATA_W-1:0] channel_out [NUM_CH-1:0]; // Output of the accumulators
+reg [DATA_W-1:0] output_vec [`MAX_DIM_LEN-1:0]; // Vector Buffer 
 reg [`DIM_W:0] channel_row_idx [NUM_CH-1:0];
 reg [`DIM_W-1:0] rows_calc;
 
 assign output_full = (rows_calc >= spm_nr); // Full output vector if total rows
 
+// Storing the Values in the Buffer  
 always_ff @(posedge clk) begin
     if (!rst_n) begin
         output_vec <= '{default: '0};
@@ -437,20 +449,21 @@ always_ff @(posedge clk) begin
     else if (spmv_init) rows_calc <= 0;
     else begin
         for(i=0; i < NUM_CH; i=i+1) begin
+            // If accumulator is pushing out value 
             if (channel_acc_done[i]) begin
-                output_vec[channel_row_idx[i]] <= channel_out[i];
+                output_vec[channel_row_idx[i]] <= mul_accumulator_out[i]; // Outputs 
                 rows_calc <= rows_calc + 1; // Counts total elements stored
             end
         end
     end
 end
 
+// Core Request Handshake for value retrieval
 wire core_resp_hsk = resp_val && resp_rdy;
 assign resp_val = retrieve_en;
 assign result_returned = (rows_retrieved == (rows_calc-1)) && core_resp_hsk; // Next clock cycle reset
 
 // Result Communication to the Core 
-
 reg [`DIM_W-1:0] rows_retrieved;
 always_ff @(posedge clk) begin
     if (!rst_n || spm_init) begin
@@ -464,7 +477,7 @@ always_ff @(posedge clk) begin
             retrieve_en <= 1;
             rows_retrieved <= 0;
         end
-
+        // If core asking for value push out to the core 
         if (core_resp_hsk) begin
             resp_data <= output_vec[rows_retrieved];
             rows_retrieved <= rows_retrieved + 1;

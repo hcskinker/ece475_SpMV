@@ -19,7 +19,7 @@ module vec_file #(
     // Mem Req Signal Interface
     input  wire                              mem_req_rdy,
     output reg                               mem_req_val,
-    output reg [5:0]                         mem_req_transid,
+    output reg [5:0]                         mem_req_transid, // Increment each memory request to update cache line
     output wire [`DCP_PADDR_MASK]            mem_req_addr, 
 
     // Mem Input Signal Interface
@@ -90,6 +90,7 @@ end
 ////////////////////////////////////////////////////////////////////////////////
 // Prefetch Response Logic 
 ////////////////////////////////////////////////////////////////////////////////
+// First Line Length 
 wire [3:0] first_line_length = VAL_PER_LINE - line_off;
 
 wire [DATA_W-1:0] mem_data [VAL_PER_LINE-1:0];
@@ -113,15 +114,17 @@ always @(posedge clk) begin
         len_cnt <= 0;
     end
     else if (prefetch && mem_resp_val) begin
+        // If first line only pay attention to values after cache line offset
         if (mem_resp_transid == 0) begin
             for (int j=0; j < first_line_length; j = j + 1) begin
-                vec_row[j] = mem_data[line_off+j];
+                vec_row[j] <= mem_data[line_off+j];
             end
             len_cnt <= len_cnt + first_line_length;
         end
+        // Other cache lines simply offset the index in the vector buffer and store elements from memory 
         else begin
             for (int j=0; j < VAL_PER_LINE; j = j + 1) begin
-                vec_row[({{VAL_ALIGN{'0}}, (mem_req_transid-6'd1)}<<VAL_ALIGN) + j + line_off] = mem_data[j];
+                vec_row[({{VAL_ALIGN{'0}}, (mem_req_transid-6'd1)}<<VAL_ALIGN) + j + line_off] <= mem_data[j];
             end
             len_cnt <= len_cnt + VAL_PER_LINE;
         end
